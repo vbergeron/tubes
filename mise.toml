@@ -1,0 +1,4 @@
+[tools]
+java = "temurin-21"
+scala = "3.9.0"
+sbt = "1.11.6"
