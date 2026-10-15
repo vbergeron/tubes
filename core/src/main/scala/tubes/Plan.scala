@@ -1,7 +1,7 @@
 package tubes
 
 import scala.annotation.implicitNotFound
-import NamedTuple.{AnyNamedTuple, Names}
+import NamedTuple.{AnyNamedTuple, DropNames, Names}
 
 /** A declarative pipeline spec; `schema` describes the rows it produces. Within each step, `$` is that schema. */
 sealed trait Plan[Out <: AnyNamedTuple]:
@@ -25,9 +25,42 @@ object Plan:
         inline def join[R <: AnyNamedTuple](right: Plan[R])(inline condition: JoinSchemas[Out, R] ?=> Column[Boolean])(
             using @implicitNotFound("Cannot join ${Out} with ${R}: their field names overlap, rename them with select first")
             disjoint: Tuple.Disjoint[Names[Out], Names[R]] =:= true
-        ): Plan[NamedTuple.Concat[Out, R]] =
+        ): Plan[NamedTuple.Concat[Out, R]] = joinSpec(right, JoinKind.Inner)(condition)
+
+        /** Like `join`, and also keeps the rows matching no right row: the right fields are optional, `None` there. */
+        inline def leftJoin[R <: AnyNamedTuple](right: Plan[R])(
+            inline condition: JoinSchemas[Out, R] ?=> Column[Boolean]
+        )(
+            using @implicitNotFound("Cannot join ${Out} with ${R}: their field names overlap, rename them with select first")
+            disjoint: Tuple.Disjoint[Names[Out], Names[R]] =:= true
+        ): Plan[NamedTuple.Concat[Out, Optional[R]]] = joinSpec(right, JoinKind.Left)(condition)
+
+        /** Like `join`, and also keeps the right rows matching no row: this plan's fields are optional, `None` there.
+          * The unmatched right rows come last.
+          */
+        inline def rightJoin[R <: AnyNamedTuple](right: Plan[R])(
+            inline condition: JoinSchemas[Out, R] ?=> Column[Boolean]
+        )(
+            using @implicitNotFound("Cannot join ${Out} with ${R}: their field names overlap, rename them with select first")
+            disjoint: Tuple.Disjoint[Names[Out], Names[R]] =:= true
+        ): Plan[NamedTuple.Concat[Optional[Out], R]] = joinSpec(right, JoinKind.Right)(condition)
+
+        /** Like `join`, and also keeps the unmatched rows of both sides: every field is optional, `None` on the
+          * missing side. The unmatched right rows come last.
+          */
+        inline def fullJoin[R <: AnyNamedTuple](right: Plan[R])(
+            inline condition: JoinSchemas[Out, R] ?=> Column[Boolean]
+        )(
+            using @implicitNotFound("Cannot join ${Out} with ${R}: their field names overlap, rename them with select first")
+            disjoint: Tuple.Disjoint[Names[Out], Names[R]] =:= true
+        ): Plan[NamedTuple.Concat[Optional[Out], Optional[R]]] = joinSpec(right, JoinKind.Full)(condition)
+
+        /** The condition is written against both inputs as they are, whatever optional fields the join outputs. */
+        private inline def joinSpec[R <: AnyNamedTuple, J <: AnyNamedTuple](right: Plan[R], kind: JoinKind)(
+            inline condition: JoinSchemas[Out, R] ?=> Column[Boolean]
+        ): Plan[J] =
             val schemas = JoinSchemas(plan.schema, RightSchema[Out, R](right.schema, plan.schema.names.length))
-            JoinSpec[Out, R](plan, right, condition(using schemas), compileJoin[Out, R](condition))
+            JoinSpec[J](plan, right, kind, condition(using schemas), compileJoin[Out, R](condition))
 
         /** Applies a reusable step to this plan. */
         def through[B <: AnyNamedTuple](step: Plan[Out] => Plan[B]): Plan[B] = step(plan)
@@ -73,18 +106,30 @@ final class SelectSpec[Out <: AnyNamedTuple](
     override def toString: String =
         schema.names.zip(columns).map((n, c) => s"$n = $c").mkString(s"SelectSpec($input, ", ", ", ")")
 
-/** Pairs the rows of `left` and `right` for which `condition` holds; the output rows hold the left fields followed by
-  * the right ones. `keys` compiles `condition` for a hash join.
+/** The fields of `NT`, each made optional. */
+type Optional[NT <: AnyNamedTuple] = NamedTuple.NamedTuple[Names[NT], Tuple.Map[DropNames[NT], Option]]
+
+/** Which unmatched rows a join keeps besides the matching pairs: none, the left ones, the right ones or both. */
+enum JoinKind(val keepsLeft: Boolean, val keepsRight: Boolean):
+    case Inner extends JoinKind(false, false)
+    case Left  extends JoinKind(true, false)
+    case Right extends JoinKind(false, true)
+    case Full  extends JoinKind(true, true)
+
+/** Pairs the rows of `left` and `right` for which `condition` holds, plus the unmatched rows `kind` keeps; the output
+  * rows hold the left fields followed by the right ones, optional on the sides an outer join may leave missing.
+  * `keys` compiles `condition` for a hash join.
   */
-final class JoinSpec[L <: AnyNamedTuple, R <: AnyNamedTuple](
-    val left: Plan[L],
-    val right: Plan[R],
+final class JoinSpec[Out <: AnyNamedTuple](
+    val left: Plan[?],
+    val right: Plan[?],
+    val kind: JoinKind,
     val condition: Column[Boolean],
     val keys: HashKeys
-) extends Plan[NamedTuple.Concat[L, R]]:
-    val schema: Schema[NamedTuple.Concat[L, R]] = new Schema(left.schema.names ++ right.schema.names)
+) extends Plan[Out]:
+    val schema: Schema[Out] = new Schema(left.schema.names ++ right.schema.names)
 
-    override def toString: String = s"JoinSpec($left, $right, $condition)"
+    override def toString: String = s"JoinSpec($kind, $left, $right, $condition)"
 
 /** Starts a plan reading `source`, whose rows are described by its `Scanable` instance. */
 def from[S, R <: AnyNamedTuple](source: S)(
