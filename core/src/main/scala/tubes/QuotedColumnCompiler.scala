@@ -55,32 +55,15 @@ def QuotedColumnCompiler(shift: Int)(using Quotes): Column.Compiler[Expr] = new 
             }
         case _ => quotes.reflect.report.errorAndAbort(s"Cannot compile column expression ${expr.show}", expr)
 
-/** Drops what inlining, `Selectable` and named tuples leave around an expression: ascriptions, casts, and inlined
-  * wrappers or blocks binding local vals, whose result it follows through those vals. Aborts if what remains still
-  * reads one of them.
-  */
+/** Drops what inlining and `Selectable` leave around an expression: inlined wrappers, ascriptions and casts. */
 private[tubes] def peel(using Quotes)(term: quotes.reflect.Term): quotes.reflect.Term =
     import quotes.reflect.*
-    def isVal(stat: Statement) = stat match
-        case ValDef(_, _, Some(_)) => true
-        case _                     => false
-    def bind(stats: List[Statement], locals: Map[Symbol, Term]) =
-        locals ++ stats.collect { case v @ ValDef(_, _, Some(rhs)) => v.symbol -> rhs }
-    def loop(t: Term, locals: Map[Symbol, Term]): (Term, Map[Symbol, Term]) = t match
-        case Inlined(_, stats, body) if stats.forall(isVal)                => loop(body, bind(stats, locals))
-        case Block(stats, body) if stats.forall(isVal)                     => loop(body, bind(stats, locals))
-        case Typed(body, _)                                                => loop(body, locals)
-        case TypeApply(Select(body, "asInstanceOf" | "$asInstanceOf$"), _) => loop(body, locals)
-        case id: Ident if locals.contains(id.symbol)                       => loop(locals(id.symbol), locals)
-        case _                                                             => (t, locals)
-    val (peeled, locals) = loop(term, Map.empty)
-    val readsLocal = new TreeAccumulator[Boolean]:
-        def foldTree(found: Boolean, tree: Tree)(owner: Symbol): Boolean = found || (tree match
-            case id: Ident => locals.contains(id.symbol)
-            case _         => foldOverTree(false, tree)(owner))
-    if readsLocal.foldTree(false, peeled)(Symbol.spliceOwner) then
-        report.errorAndAbort(s"Cannot read ${peeled.show}: it depends on local definitions", term.pos)
-    peeled
+    term match
+        case Inlined(_, Nil, body)                                         => peel(body)
+        case Typed(body, _)                                                => peel(body)
+        case Block(Nil, body)                                              => peel(body)
+        case TypeApply(Select(body, "asInstanceOf" | "$asInstanceOf$"), _) => peel(body)
+        case _                                                             => term
 
 /** Same as `peel`, for column expressions. */
 private[tubes] def stripColumn[C <: Column[?]](using Quotes)(expr: Expr[C]): Expr[C] =
