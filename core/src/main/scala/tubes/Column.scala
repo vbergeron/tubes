@@ -20,6 +20,7 @@ enum Column[A]:
     case And(lhs: Column[Boolean], rhs: Column[Boolean]) extends Column[Boolean]
     case Or(lhs: Column[Boolean], rhs: Column[Boolean]) extends Column[Boolean]
     case Not(col: Column[Boolean]) extends Column[Boolean]
+    case Default[A](col: Column[Option[A]], value: Column[A]) extends Column[A]
 
 object Column:
     /** The columns of a schema with field names `N` and field types `T`. */
@@ -55,6 +56,11 @@ object Column:
         inline def >(inline rhs: A): Column[Boolean]          = Compare(CmpOp.Gt, lhs, Lit(rhs), ord)
         inline def >=(inline rhs: Column[A]): Column[Boolean] = Compare(CmpOp.Ge, lhs, rhs, ord)
         inline def >=(inline rhs: A): Column[Boolean]         = Compare(CmpOp.Ge, lhs, Lit(rhs), ord)
+
+    /** Optional columns, such as fields typed `Option[A]`, fall back to `value` where they hold `None`. */
+    extension [A](inline lhs: Column[Option[A]])
+        inline def default(inline value: Column[A]): Column[A] = Default(lhs, value)
+        inline def default(inline value: A): Column[A]         = Default(lhs, Lit(value))
 
     extension (inline lhs: Column[Boolean])
         inline def &&(inline rhs: Column[Boolean]): Column[Boolean] = And(lhs, rhs)
