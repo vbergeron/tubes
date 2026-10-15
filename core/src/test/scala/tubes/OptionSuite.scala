@@ -35,3 +35,32 @@ class OptionSuite extends munit.FunSuite:
             plan.materialize(RowKernel()),
             List((name = "alice", pet = "cat"), (name = "bob", pet = "stray"), (name = "bob", pet = "dog"))
         )
+
+    test("arithmetic on an optional column is optional, and missing where it is"):
+        val plan = from(people).select(Tuple1(($.age + 1).as("next")))
+        assertEquals(plan.materialize(RowKernel()).map(_.next), List(Some(31), None, Some(16)))
+
+    test("arithmetic mixes optional and plain columns, either way round"):
+        case class Row(a: Int, b: Option[Int], c: Option[Int])
+        val rows = List(Row(1, Some(2), Some(3)), Row(4, None, Some(5)), Row(6, Some(7), None))
+        val plan = from(rows).select((($.a + $.b).as("ab"), ($.b * $.a).as("ba"), ($.b - $.c).as("bc"), ($.a + $.a).as("aa")))
+        assertEquals(
+            plan.materialize(RowKernel()),
+            List(
+                (ab = Some(3), ba = Some(2), bc = Some(-1), aa = 2),
+                (ab = None, ba = None, bc = None, aa = 8),
+                (ab = Some(13), ba = Some(42), bc = None, aa = 12)
+            )
+        )
+
+    test("comparisons on optional columns are optional booleans, defaulted to filter"):
+        val compared = from(people).select(Tuple1(($.age >= 18).as("adult")))
+        assertEquals(compared.materialize(RowKernel()).map(_.adult), List(Some(true), None, Some(false)))
+        val plan = from(people).filter(($.age >= 18).default(false)).select(Tuple1($.name))
+        assertEquals(plan.materialize(RowKernel()).map(_.name), List("alice"))
+
+    test("operators are optional only when a side is"):
+        given Schema[NamedTuple.From[Person]] = Schema.derived[Person]
+        val plain: Column[Boolean]            = $.age.default(0) + 1 > 1
+        val optional: Column[Option[Boolean]] = $.age > $.age.default(0)
+        assert(compiletime.testing.typeChecks("""val c: Column[Boolean] = $.age > 1""") == false)
