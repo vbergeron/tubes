@@ -30,7 +30,7 @@ def nextYear(users: Plan[UserRow]) =
         .filter($.nextAge > 30)
 
     println(older)
-    for row <- older.materialize(RowKernel()) do println(s"${row.name} -> ${row.nextAge}")
+    for row <- older.materialize(RowKernel(List)) do println(s"${row.name} -> ${row.nextAge}")
 
     // Steps are plain functions, so they also compose on their own.
     val adultsNextYear = adults andThen nextYear
@@ -39,7 +39,7 @@ def nextYear(users: Plan[UserRow]) =
         .through(adultsNextYear)
         .select(($.name, ($.nextAge * 2).as("doubled")))
 
-    for row <- doubled.materialize(RowKernel()) do println(s"${row.name} -> ${row.doubled}")
+    for row <- doubled.materialize(RowKernel(List)) do println(s"${row.name} -> ${row.doubled}")
 
     // A spec over an unbound input: any named tuple has a schema, so `from[A]` needs no data.
     val spec = from[UserRow].through(adultsNextYear)
@@ -62,4 +62,4 @@ def nextYear(users: Plan[UserRow]) =
         .select(($.name, $.orderId, $.amount))
 
     println(bigSpenders)
-    for row <- bigSpenders.materialize(RowKernel()) do println(s"${row.name} ordered #${row.orderId} for ${row.amount}")
+    for row <- bigSpenders.materialize(RowKernel(List)) do println(s"${row.name} ordered #${row.orderId} for ${row.amount}")

@@ -38,4 +38,4 @@ class RowKernelBench:
 
     @Benchmark
     def rowKernel(): List[Result] =
-        query.materialize(RowKernel())
+        query.materialize(RowKernel(List))

@@ -1,17 +1,35 @@
 package tubes
 
+import scala.collection.Factory
 import scala.jdk.CollectionConverters.*
+import scala.reflect.ClassTag
 import NamedTuple.AnyNamedTuple
 
 /** Row-based kernel: streams a plan's rows through one iterator pipeline, using the row functions compiled into its
-  * nodes, and collects the result.
+  * nodes, and collects the result with `factory`.
   */
-final class RowKernel[Out <: AnyNamedTuple] extends Plan.Compiler[Out]:
-    type A = List[Out]
+final class RowKernel[Out <: AnyNamedTuple, C] private (factory: Factory[Out, C]) extends Plan.Compiler[Out]:
+    type A = C
 
-    def compile(plan: Plan[Out]): List[Out] = RowKernel.rows(plan, asTuples = true).toList.asInstanceOf[List[Out]]
+    def compile(plan: Plan[Out]): C =
+        factory.fromSpecific(RowKernel.rows(plan, asTuples = true).asInstanceOf[Iterator[Out]])
 
 object RowKernel:
+    /** Collects the rows with a standard collection companion such as `List`, `Vector` or `Set`, or any `Factory`. */
+    def apply[Out <: AnyNamedTuple, C](factory: Factory[Out, C]): RowKernel[Out, C] = new RowKernel(factory)
+
+    /** Collects the rows into an `Array`. */
+    def apply[Out <: AnyNamedTuple: ClassTag](factory: Array.type): RowKernel[Out, Array[Out]] =
+        new RowKernel(Array.toFactory[Out](factory))
+
+    /** Collects the rows into an `IArray`. */
+    def apply[Out <: AnyNamedTuple: ClassTag](factory: IArray.type): RowKernel[Out, IArray[Out]] =
+        new RowKernel(
+            new Factory[Out, IArray[Out]]:
+                def fromSpecific(it: IterableOnce[Out]): IArray[Out] = IArray.from(it)
+                def newBuilder = Array.newBuilder[Out].mapResult(IArray.unsafeFromArray)
+        )
+
     /** Rows produced by `plan`. Inside the plan rows keep whatever representation is cheapest, such as a source's own
       * values or joined rows read in place; `asTuples` asks for `Out` tuples instead, which the node producing them
       * builds directly rather than having them copied afterwards.
