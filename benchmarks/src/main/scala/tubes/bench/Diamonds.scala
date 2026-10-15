@@ -23,9 +23,8 @@ object Diamonds:
 
     /** The cached CSV, downloaded on first use; resolved from either the repo root or `benchmarks/`. */
     def file: Path =
-        val path = Seq(Paths.get("benchmarks", "data", "diamonds.csv"), Paths.get("data", "diamonds.csv"))
-            .find(p => Files.exists(p))
-            .getOrElse(Paths.get("benchmarks", "data", "diamonds.csv"))
+        val inRoot = Files.isDirectory(Paths.get("benchmarks"))
+        val path   = if inRoot then Paths.get("benchmarks", "data", "diamonds.csv") else Paths.get("data", "diamonds.csv")
         if !Files.exists(path) then
             Files.createDirectories(path.getParent)
             val in = URI.create(url).toURL.openStream()

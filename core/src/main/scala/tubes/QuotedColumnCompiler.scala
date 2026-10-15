@@ -3,13 +3,22 @@ package tubes
 import scala.quoted.*
 
 /** Compiles quoted column trees, written with `Column` constructors, into quoted row functions. */
-def QuotedColumnCompiler(using Quotes): Column.Compiler[Expr] = new Column.Compiler[Expr]:
+def QuotedColumnCompiler(using Quotes): Column.Compiler[Expr] = QuotedColumnCompiler(0)
+
+/** Same as `QuotedColumnCompiler`, for rows holding field `index` at position `index - shift`: compiles the right-hand
+  * expressions of a join, whose references point into the joined row, to read right rows directly.
+  */
+def QuotedColumnCompiler(shift: Int)(using Quotes): Column.Compiler[Expr] = new Column.Compiler[Expr]:
     def compile[A](col: Expr[Column[A]]): Expr[Product => A] = (col: Expr[Any]) match
         case '{ $c: Column[t] } => typed[t](c).asInstanceOf[Expr[Product => A]]
 
     /** Same as `compile`, with the column's value type available to the quotes. */
-    private def typed[A: Type](expr: Expr[Column[A]]): Expr[Product => A] = strip(expr) match
-        case '{ type n <: String; Column.Ref[A, n]($name, $index) } => '{ (row: Product) => row.productElement($index).asInstanceOf[A] }
+    private def typed[A: Type](expr: Expr[Column[A]]): Expr[Product => A] = stripColumn(expr) match
+        case '{ type n <: String; Column.Ref[A, n]($name, $index) } =>
+            val at = index.value match
+                case Some(i) => Expr(i - shift)
+                case None    => if shift == 0 then index else '{ $index - ${ Expr(shift) } }
+            '{ (row: Product) => row.productElement($at).asInstanceOf[A] }
         case '{ type n <: String; Column.Alias[A, n]($c, $name) }   => typed(c)
         case '{ Column.Lit[A]($value) }              => '{ (row: Product) => $value }
         case '{ Column.Arith[A]($op, $l, $r, $num) } =>
@@ -40,16 +49,16 @@ def QuotedColumnCompiler(using Quotes): Column.Compiler[Expr] = new Column.Compi
             '{ (row: Product) => !$f(row) }.asExprOf[Product => A]
         case _ => quotes.reflect.report.errorAndAbort(s"Cannot compile column expression ${expr.show}", expr)
 
-    /** Drops what inlining and `Selectable` leave around constructor calls: inlined wrappers, ascriptions and casts. */
-    private def strip[A: Type](expr: Expr[Column[A]]): Expr[Column[A]] =
-        import quotes.reflect.*
-        def loop(t: Term): Term = t match
-            case Inlined(_, Nil, body)                         => loop(body)
-            case Typed(body, _)                                => loop(body)
-            case Block(Nil, body)                              => loop(body)
-            case TypeApply(Select(body, "asInstanceOf" | "$asInstanceOf$"), _) => loop(body)
-            case _                                             => t
-        loop(expr.asTerm).asExprOf[Column[A]]
+/** Drops what inlining and `Selectable` leave around constructor calls: inlined wrappers, ascriptions and casts. */
+private[tubes] def stripColumn[C <: Column[?]](using Quotes)(expr: Expr[C]): Expr[C] =
+    import quotes.reflect.*
+    def loop(t: Term): Term = t match
+        case Inlined(_, Nil, body)                                         => loop(body)
+        case Typed(body, _)                                                => loop(body)
+        case Block(Nil, body)                                              => loop(body)
+        case TypeApply(Select(body, "asInstanceOf" | "$asInstanceOf$"), _) => loop(body)
+        case _                                                             => t
+    loop(expr.asTerm).asExpr.asInstanceOf[Expr[C]]
 
 /** Compiles `col` into a row function at compile time; it must be written with `Column` constructors. */
 inline def compileColumn[A](inline col: Column[A]): Product => A = ${ compileColumnImpl('col) }
@@ -74,7 +83,7 @@ private def compileProjectionImpl[S: Type, C: Type](step: Expr[S ?=> C])(using Q
     '{ (row: Product) => ${ Expr.ofTupleFromSeq(compiled.map(f => Expr.betaReduce('{ $f(row) }))) }.asInstanceOf[Product] }
 
 /** The body of a step lambda; the columns inside it do not use the lambda's schema once `$.field` is resolved. */
-private def stepBody(using Quotes)(step: Expr[Any]): Expr[Any] =
+private[tubes] def stepBody(using Quotes)(step: Expr[Any]): Expr[Any] =
     import quotes.reflect.*
     def loop(t: Term): Term = t match
         case Inlined(_, Nil, body) => loop(body)

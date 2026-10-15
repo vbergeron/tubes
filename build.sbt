@@ -19,7 +19,8 @@ lazy val root = (project in file("."))
 
 lazy val core = (project in file("core"))
   .settings(
-    name := "tubes"
+    name                                   := "tubes",
+    libraryDependencies += "org.scalameta" %% "munit" % "1.1.1" % Test
   )
 
 lazy val benchmarks = (project in file("benchmarks"))
