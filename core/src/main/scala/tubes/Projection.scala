@@ -17,6 +17,9 @@ object Projection:
             type Out = O
             def columns(c: C) = f(c)
 
+    /** `$.x` alone, without a tuple, gives a single field. */
+    given single[N <: String, A]: Aux[Column[A] & Named[N], NamedTuple[N *: EmptyTuple, A *: EmptyTuple]] = make(List(_))
+
     /** `($.x, ($.y + 1).as("z"))` takes each output name from the column itself. */
     given empty: Aux[EmptyTuple, NamedTuple[EmptyTuple, EmptyTuple]] = make(_ => Nil)
 

@@ -121,10 +121,20 @@ private[tubes] def stepBody(using Quotes)(step: Expr[Any]): Expr[Any] =
         case Lambda(_, body) => body.asExpr
         case other           => report.errorAndAbort(s"Expected a step lambda, got ${other.show}", other.pos)
 
-/** The elements of a tuple literal, plain or named. */
-private def tupleElements(using Quotes)(tuple: quotes.reflect.Term): List[Expr[Any]] =
+/** Compiles the key computed by a `groupBy` lambda: the value of a single column, or a tuple of several. */
+inline def compileKey[S, K](inline step: S ?=> K): Product => Any = ${ compileKeyImpl('step) }
+
+private def compileKeyImpl[S: Type, K: Type](step: Expr[S ?=> K])(using Quotes): Expr[Product => Any] =
+    import quotes.reflect.*
+    tupleElements(stepBody(step).asTerm) match
+        case List('{ $c: Column[t] }) => QuotedColumnCompiler.compile(c)
+        case _                        => compileProjectionImpl(step)
+
+/** The elements of a tuple literal, or the expression itself when it is a single element rather than a tuple. */
+private[tubes] def tupleElements(using Quotes)(tuple: quotes.reflect.Term): List[Expr[Any]] =
     import quotes.reflect.*
     peel(tuple) match
         case Apply(TypeApply(Select(tupleN, "apply"), _), args) if tupleN.symbol.fullName.startsWith("scala.Tuple") =>
             args.map(_.asExpr)
+        case single if !(single.tpe <:< TypeRepr.of[Tuple]) => List(single.asExpr)
         case other => report.errorAndAbort(s"Expected a tuple of columns, got ${other.show}", other.pos)
