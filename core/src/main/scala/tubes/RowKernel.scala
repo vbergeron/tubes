@@ -9,33 +9,24 @@ import NamedTuple.AnyNamedTuple
 final class RowKernel[Out <: AnyNamedTuple] extends Plan.Compiler[Out]:
     type A = List[Out]
 
-    def compile(plan: Plan[Out]): List[Out] =
-        val result = RowKernel.rows(plan)
-        (if RowKernel.yieldsTuples(plan) then result else result.map(Tuple.fromProduct)).toList.asInstanceOf[List[Out]]
+    def compile(plan: Plan[Out]): List[Out] = RowKernel.rows(plan, asTuples = true).toList.asInstanceOf[List[Out]]
 
 object RowKernel:
-    /** Rows produced by `plan`, in whatever representation its scan or last select left them. */
-    private def rows(plan: Plan[?]): Iterator[Product] = plan match
+    /** Rows produced by `plan`. Inside the plan rows keep whatever representation is cheapest, such as a source's own
+      * values or joined rows read in place; `asTuples` asks for `Out` tuples instead, which the node producing them
+      * builds directly rather than having them copied afterwards.
+      */
+    private def rows(plan: Plan[?], asTuples: Boolean = false): Iterator[Product] = plan match
         case s: Scan[?] =>
             s.source match
-                case Some(src) => src.scan
+                case Some(src) => if asTuples then src.scan.map(Tuple.fromProduct) else src.scan
                 case None      => sys.error(s"RowKernel has no data bound for $s")
-        case f: FilterSpec[?] => rows(f.input).filter(f.compiled)
-        case s: SelectSpec[?] => rows(s.input).map(s.compiled)
-        case j: JoinSpec[?]   => hashJoin(j)
+        case f: FilterSpec[?]  => rows(f.input, asTuples).filter(f.compiled)
+        case s: SelectSpec[?]  => rows(s.input).map(s.compiled)
+        case j: JoinSpec[?]    => hashJoin(j, asTuples)
         case g: GroupBySpec[?] => group(g)
-        case t: TakeSpec[?]    => rows(t.input).take(t.count)
-        case s: SkipSpec[?]    => rows(s.input).drop(s.count)
-
-    /** Whether `plan`'s rows are already `Out` tuples; otherwise they are still a source's own values. */
-    private def yieldsTuples(plan: Plan[?]): Boolean = plan match
-        case _: Scan[?]       => false
-        case f: FilterSpec[?] => yieldsTuples(f.input)
-        case _: SelectSpec[?] => true
-        case _: JoinSpec[?]   => false
-        case _: GroupBySpec[?] => true
-        case t: TakeSpec[?]    => yieldsTuples(t.input)
-        case s: SkipSpec[?]    => yieldsTuples(s.input)
+        case t: TakeSpec[?]    => rows(t.input, asTuples).take(t.count)
+        case s: SkipSpec[?]    => rows(s.input, asTuples).drop(s.count)
 
     /** Folds every input row into the accumulators of its group, then emits one row per group: its key fields, then
       * its aggregated values. Groups come out in order of their first row.
@@ -72,24 +63,51 @@ object RowKernel:
     /** Builds a hash table over the right rows, then streams the left rows through it, in order. Outer joins then add
       * the right rows that matched nothing.
       */
-    private def hashJoin(j: JoinSpec[?]): Iterator[Product] =
+    private def hashJoin(j: JoinSpec[?], asTuples: Boolean): Iterator[Product] =
         val table   = HashTable(rows(j.right), j.keys)
         val matched = if j.kind.keepsRight then new Array[Boolean](table.rows.length) else null
-        val shape   = Shape(j.kind, j.left.schema.names.length, j.right.schema.names.length)
+        val shape   = Shape(j.kind, j.left.schema.names.length, j.right.schema.names.length, asTuples)
         val joined  = Probe(rows(j.left), table, j.keys, shape, matched)
         if matched == null then joined
         else
             joined ++ Iterator.range(0, table.rows.length).filterNot(matched).map(i => shape.row(null, table.rows(i)))
 
-    /** How a join lays out its output rows. */
-    private final class Shape(kind: JoinKind, val leftArity: Int, rightArity: Int):
+    /** How a join lays out its output rows: read in place as joined rows, or built once as `Out` tuples when
+      * `asTuples`, so the result is not copied again.
+      */
+    private final class Shape(kind: JoinKind, val leftArity: Int, rightArity: Int, val asTuples: Boolean):
         val inner: Boolean     = kind == JoinKind.Inner
         val keepsLeft: Boolean = kind.keepsLeft
 
+        /** One view reused for every output tuple: `Tuple.fromProduct` copies its fields straight into the tuple. */
+        private val view = RowView(leftArity, rightArity, kind.keepsRight, kind.keepsLeft)
+
         /** A row of `left` and `right`, either of which may be `null` where `kind` keeps unmatched rows. */
         def row(left: Product, right: Product): Product =
-            if inner then JoinedRow(left, right, leftArity)
+            if asTuples then
+                view.left = left
+                view.right = right
+                Tuple.fromProduct(view)
+            else if inner then JoinedRow(left, right, leftArity)
             else OuterRow(left, right, leftArity, rightArity, kind.keepsRight, kind.keepsLeft)
+
+    /** The fields of `left` then `right`, read in place like an `OuterRow`, but pointed at a new pair for each row. */
+    private final class RowView(leftArity: Int, rightArity: Int, optionalLeft: Boolean, optionalRight: Boolean)
+        extends Product:
+        var left: Product  = null
+        var right: Product = null
+
+        def productArity: Int = leftArity + rightArity
+
+        def productElement(n: Int): Any =
+            if n < leftArity then field(left, n, optionalLeft) else field(right, n - leftArity, optionalRight)
+
+        private def field(side: Product, n: Int, optional: Boolean): Any =
+            if !optional then side.productElement(n)
+            else if side == null then None
+            else Some(side.productElement(n))
+
+        def canEqual(that: Any): Boolean = false
 
     /** Right rows grouped by key, in flat arrays. Each bucket chains its groups through `groupNext`, starting at
       * `heads`; each group chains its rows through `rowNext`, in input order, starting at `groupFirst`. `-1` ends a chain.
@@ -165,12 +183,13 @@ object RowKernel:
             if at >= 0 then
                 val i = at
                 at = table.rowNext(at)
-                val right  = table.rows(i)
-                val joined = JoinedRow(row, right, shape.leftArity)
-                if residual == null || residual(joined) then
+                val right = table.rows(i)
+                // The residual reads the pair as a joined row; without one, no row is built for rejected candidates.
+                val joined = if residual == null then null else JoinedRow(row, right, shape.leftArity)
+                if joined == null || residual(joined) then
                     found = true
                     if matched != null then matched(i) = true
-                    pending = if shape.inner then joined else shape.row(row, right)
+                    pending = if joined != null && shape.inner && !shape.asTuples then joined else shape.row(row, right)
             else
                 if keepsLeft && !found then pending = shape.row(row, null)
                 row = null
