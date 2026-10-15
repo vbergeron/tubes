@@ -69,6 +69,12 @@ object Plan:
         inline def groupBy[K](inline keys: Schema[Out] ?=> K)(using k: Projection[K]): GroupBy[Out, k.Out] =
             GroupBy(plan, k.columns(keys(using plan.schema)), compileKey(keys))
 
+        /** Keeps the first `n` rows, or none when `n` is not positive. */
+        def take(n: Int): Plan[Out] = TakeSpec(plan, n)
+
+        /** Drops the first `n` rows, or none when `n` is not positive. */
+        def skip(n: Int): Plan[Out] = SkipSpec(plan, n)
+
         /** Applies a reusable step to this plan. */
         def through[B <: AnyNamedTuple](step: Plan[Out] => Plan[B]): Plan[B] = step(plan)
 
@@ -137,6 +143,18 @@ final class GroupBySpec[Out <: AnyNamedTuple](
 
     override def toString: String =
         s"GroupBySpec($input, ${keys.map(_.name).mkString("[", ", ", "]")}, ${aggregates.mkString(", ")})"
+
+/** The first `count` rows of `input`; the row shape is unchanged. */
+final class TakeSpec[Out <: AnyNamedTuple](val input: Plan[Out], val count: Int) extends Plan[Out]:
+    def schema: Schema[Out] = input.schema
+
+    override def toString: String = s"TakeSpec($input, $count)"
+
+/** The rows of `input` after the first `count`; the row shape is unchanged. */
+final class SkipSpec[Out <: AnyNamedTuple](val input: Plan[Out], val count: Int) extends Plan[Out]:
+    def schema: Schema[Out] = input.schema
+
+    override def toString: String = s"SkipSpec($input, $count)"
 
 /** The fields of `NT`, each made optional. */
 type Optional[NT <: AnyNamedTuple] = NamedTuple.NamedTuple[Names[NT], Tuple.Map[DropNames[NT], Option]]
