@@ -1,0 +1,58 @@
+package tubes
+
+import scala.quoted.*
+
+/** Compiles quoted column trees, written with `Column` constructors, into quoted row functions. */
+def QuotedColumnCompiler(using Quotes): Column.Compiler[Expr] = new Column.Compiler[Expr]:
+    def compile[A](col: Expr[Column[A]]): Expr[Product => A] = (col: Expr[Any]) match
+        case '{ $c: Column[t] } => typed[t](c).asInstanceOf[Expr[Product => A]]
+
+    /** Same as `compile`, with the column's value type available to the quotes. */
+    private def typed[A: Type](expr: Expr[Column[A]]): Expr[Product => A] = strip(expr) match
+        case '{ type n <: String; Column.Ref[A, n]($name, $index) } => '{ (row: Product) => row.productElement($index).asInstanceOf[A] }
+        case '{ type n <: String; Column.Alias[A, n]($c, $name) }   => typed(c)
+        case '{ Column.Lit[A]($value) }              => '{ (row: Product) => $value }
+        case '{ Column.Arith[A]($op, $l, $r, $num) } =>
+            val (fl, fr) = (typed(l), typed(r))
+            op match
+                case '{ ArithOp.Plus }  => '{ (row: Product) => $num.plus($fl(row), $fr(row)) }
+                case '{ ArithOp.Minus } => '{ (row: Product) => $num.minus($fl(row), $fr(row)) }
+                case '{ ArithOp.Times } => '{ (row: Product) => $num.times($fl(row), $fr(row)) }
+        case '{ Column.Compare[t]($op, $l, $r, $ord) } =>
+            val (fl, fr) = (typed(l), typed(r))
+            val f = op match
+                case '{ CmpOp.Lt } => '{ (row: Product) => $ord.lt($fl(row), $fr(row)) }
+                case '{ CmpOp.Le } => '{ (row: Product) => $ord.lteq($fl(row), $fr(row)) }
+                case '{ CmpOp.Gt } => '{ (row: Product) => $ord.gt($fl(row), $fr(row)) }
+                case '{ CmpOp.Ge } => '{ (row: Product) => $ord.gteq($fl(row), $fr(row)) }
+            f.asExprOf[Product => A]
+        case '{ Column.Equal[t]($l, $r) }            =>
+            val (fl, fr) = (typed(l), typed(r))
+            '{ (row: Product) => $fl(row) == $fr(row) }.asExprOf[Product => A]
+        case '{ Column.And($l, $r) }                 =>
+            val (fl, fr) = (typed(l), typed(r))
+            '{ (row: Product) => $fl(row) && $fr(row) }.asExprOf[Product => A]
+        case '{ Column.Or($l, $r) }                  =>
+            val (fl, fr) = (typed(l), typed(r))
+            '{ (row: Product) => $fl(row) || $fr(row) }.asExprOf[Product => A]
+        case '{ Column.Not($c) }                     =>
+            val f = typed(c)
+            '{ (row: Product) => !$f(row) }.asExprOf[Product => A]
+        case _ => quotes.reflect.report.errorAndAbort(s"Cannot compile column expression ${expr.show}", expr)
+
+    /** Drops what inlining and `Selectable` leave around constructor calls: inlined wrappers, ascriptions and casts. */
+    private def strip[A: Type](expr: Expr[Column[A]]): Expr[Column[A]] =
+        import quotes.reflect.*
+        def loop(t: Term): Term = t match
+            case Inlined(_, Nil, body)                         => loop(body)
+            case Typed(body, _)                                => loop(body)
+            case Block(Nil, body)                              => loop(body)
+            case TypeApply(Select(body, "asInstanceOf" | "$asInstanceOf$"), _) => loop(body)
+            case _                                             => t
+        loop(expr.asTerm).asExprOf[Column[A]]
+
+/** Compiles `col` into a row function at compile time; it must be written with `Column` constructors. */
+inline def compileColumn[A](inline col: Column[A]): Product => A = ${ compileColumnImpl('col) }
+
+private def compileColumnImpl[A: Type](col: Expr[Column[A]])(using Quotes): Expr[Product => A] =
+    QuotedColumnCompiler.compile(col)

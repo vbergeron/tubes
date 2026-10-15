@@ -9,3 +9,5 @@ metals.sbt
 .vscode/
 *.class
 *.log
+benchmarks/data/
+.scala-build/
