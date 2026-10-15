@@ -1,6 +1,7 @@
 package tubes.bench.h2o
 
 import java.util.concurrent.TimeUnit
+import scala.reflect.ClassTag
 import org.openjdk.jmh.annotations.*
 import tubes.*
 import NamedTuple.{Concat, From}
@@ -19,7 +20,7 @@ type Q5Join = Concat[XRow, BigRow]
 /** The join questions of the H2O.ai db-benchmark (https://h2oai.github.io/db-benchmark/), joining `n` left rows with
   * right tables of `n / 1e6`, `n / 1e3` and `n` rows. Like db-benchmark, each question returns the full joined table:
   * the left fields followed by the right ones. Each runs on the row kernel and as a hand-written hash join building a
-  * `HashMap` over the right table and the same output rows; setup checks both give the same rows.
+  * `HashMap` over the right table and the same output rows, both collecting into an `IArray`; setup checks both give the same rows.
   */
 @State(Scope.Benchmark)
 @BenchmarkMode(Array(Mode.AverageTime))
@@ -55,9 +56,9 @@ class H2OJoinBench:
         check("q4", handWrittenQ4(), rowKernelQ4())
         check("q5", handWrittenQ5(), rowKernelQ5())
 
-    private def check(name: String, expected: List[?], actual: List[?]): Unit =
+    private def check[R](name: String, expected: IArray[R], actual: IArray[R]): Unit =
         require(expected.nonEmpty, s"$name: no rows")
-        require(expected == actual, s"$name: kernel disagrees on ${expected.size} rows")
+        require(expected.sameElements(actual), s"$name: kernel disagrees on ${expected.size} rows")
 
     /** The right rows by key; db-benchmark right tables hold each key once. */
     private def index[K, R](rows: Vector[R])(key: R => K): java.util.HashMap[K, R] =
@@ -66,20 +67,20 @@ class H2OJoinBench:
         table
 
     /** Joins each left row with the right row of its key, dropping the rows without one, into `row(left, right)`. */
-    private inline def innerJoin[K, R, O](table: java.util.HashMap[K, R])(inline key: JoinX => K)(
+    private inline def innerJoin[K, R, O: ClassTag](table: java.util.HashMap[K, R])(inline key: JoinX => K)(
         inline row: (JoinX, R) => O
-    ): List[O] =
-        val out = List.newBuilder[O]
+    ): IArray[O] =
+        val out = Array.newBuilder[O]
         for l <- data.x do
             val r = table.get(key(l))
             if r != null then out += row(l, r)
-        out.result()
+        IArray.unsafeFromArray(out.result())
 
     // q1: small inner join on an int key
 
-    @Benchmark def rowKernelQ1(): List[Q1Join] = q1.materialize(RowKernel())
+    @Benchmark def rowKernelQ1(): IArray[Q1Join] = q1.materialize(RowKernel(IArray))
 
-    @Benchmark def handWrittenQ1(): List[Q1Join] =
+    @Benchmark def handWrittenQ1(): IArray[Q1Join] =
         innerJoin(index(data.small)(_.sId1))(_.id1): (l, r) =>
             (
                 id1 = l.id1, id2 = l.id2, id3 = l.id3, id4 = l.id4, id5 = l.id5, id6 = l.id6, v1 = l.v1,
@@ -88,18 +89,18 @@ class H2OJoinBench:
 
     // q2: medium inner join on an int key
 
-    @Benchmark def rowKernelQ2(): List[Q2Join] = q2.materialize(RowKernel())
+    @Benchmark def rowKernelQ2(): IArray[Q2Join] = q2.materialize(RowKernel(IArray))
 
-    @Benchmark def handWrittenQ2(): List[Q2Join] =
+    @Benchmark def handWrittenQ2(): IArray[Q2Join] =
         innerJoin(index(data.medium)(_.mId2))(_.id2)(mediumRow)
 
     // q3: medium left outer join on an int key
 
-    @Benchmark def rowKernelQ3(): List[Q3Join] = q3.materialize(RowKernel())
+    @Benchmark def rowKernelQ3(): IArray[Q3Join] = q3.materialize(RowKernel(IArray))
 
-    @Benchmark def handWrittenQ3(): List[Q3Join] =
+    @Benchmark def handWrittenQ3(): IArray[Q3Join] =
         val table = index(data.medium)(_.mId2)
-        val out   = List.newBuilder[Q3Join]
+        val out   = Array.newBuilder[Q3Join]
         for l <- data.x do
             val r = Option(table.get(l.id2))
             val row: Q3Join = (
@@ -107,20 +108,20 @@ class H2OJoinBench:
                 mId1 = r.map(_.mId1), mId2 = r.map(_.mId2), mId4 = r.map(_.mId4), mId5 = r.map(_.mId5), v2 = r.map(_.v2)
             )
             out += row
-        out.result()
+        IArray.unsafeFromArray(out.result())
 
     // q4: medium inner join on a string key
 
-    @Benchmark def rowKernelQ4(): List[Q4Join] = q4.materialize(RowKernel())
+    @Benchmark def rowKernelQ4(): IArray[Q4Join] = q4.materialize(RowKernel(IArray))
 
-    @Benchmark def handWrittenQ4(): List[Q4Join] =
+    @Benchmark def handWrittenQ4(): IArray[Q4Join] =
         innerJoin(index(data.medium)(_.mId5))(_.id5)(mediumRow)
 
     // q5: big inner join on an int key
 
-    @Benchmark def rowKernelQ5(): List[Q5Join] = q5.materialize(RowKernel())
+    @Benchmark def rowKernelQ5(): IArray[Q5Join] = q5.materialize(RowKernel(IArray))
 
-    @Benchmark def handWrittenQ5(): List[Q5Join] =
+    @Benchmark def handWrittenQ5(): IArray[Q5Join] =
         innerJoin(index(data.big)(_.bId3))(_.id3): (l, r) =>
             (
                 id1 = l.id1, id2 = l.id2, id3 = l.id3, id4 = l.id4, id5 = l.id5, id6 = l.id6, v1 = l.v1,
