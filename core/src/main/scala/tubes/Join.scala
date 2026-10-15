@@ -38,13 +38,15 @@ final class JoinedRow(val left: Product, val right: Product, leftArity: Int) ext
 
     override def toString: String = productIterator.mkString("JoinedRow(", ", ", ")")
 
-/** A join condition compiled for a hash join: equalities between a left and a right expression become the hash keys,
-  * computed by `leftKey` on left rows and `rightKey` on right rows; whatever else the condition requires is checked by
-  * `residual` on joined rows.
+/** A join condition compiled for a hash join: equalities between a left and a right expression become the hash keys.
+  * `leftHash` and `rightHash` hash the keys of left and right rows alike, `matches` compares a left key with a right one,
+  * `sameKey` two right ones, and `residual` checks whatever else the condition requires on joined rows.
   */
 final class HashKeys(
-    val leftKey: Product => Any,
-    val rightKey: Product => Any,
+    val leftHash: Product => Int,
+    val rightHash: Product => Int,
+    val matches: (Product, Product) => Boolean,
+    val sameKey: (Product, Product) => Boolean,
     val residual: Option[Product => Boolean]
 )
 
@@ -65,27 +67,57 @@ private def compileJoinImpl[L <: AnyNamedTuple: Type, R <: AnyNamedTuple: Type](
             case Some(List(onLeft)) => Some(onLeft)
             case _                  => None
 
+    /** An equality between a left and a right expression of type `T`. */
+    final case class Key[T](left: Expr[Column[T]], right: Expr[Column[T]])(using val tpe: Type[T])
+
     val equalities = conjuncts.map:
         case c @ '{ Column.Equal[t]($a, $b) } =>
             (side(a), side(b)) match
-                case (Some(true), Some(false)) => Right((a, b))
-                case (Some(false), Some(true)) => Right((b, a))
+                case (Some(true), Some(false)) => Right(Key(a, b))
+                case (Some(false), Some(true)) => Right(Key(b, a))
                 case _                         => Left(c)
         case c => Left(c)
-    val keys     = equalities.collect { case Right(pair) => pair }
+    val keys     = equalities.collect { case Right(key) => key }
     val residual = equalities.collect { case Left(c) => c }
 
-    def key(cols: List[Expr[Column[?]]], shift: Int): Expr[Product => Any] =
-        val compiled = cols.map(c => QuotedColumnCompiler(shift).compile(c.asInstanceOf[Expr[Column[Any]]]))
-        compiled match
-            case Nil      => '{ (row: Product) => () }
-            case f :: Nil => f
-            case fs       => '{ (row: Product) => ${ Expr.ofTupleFromSeq(fs.map(f => Expr.betaReduce('{ $f(row) }))) } }
+    /** Combines the hashes of the key columns read by `side`, as compiled against rows shifted by `shift`. */
+    def hash(side: Key[?] => Expr[Column[?]], shift: Int): Expr[Product => Int] =
+        '{ (row: Product) =>
+            ${
+                keys.foldLeft(Expr(0)): (acc, key) =>
+                    import key.tpe
+                    val f = QuotedColumnCompiler(shift).compile(side(key).asInstanceOf[Expr[Column[key.tpe.Underlying]]])
+                    '{ 31 * $acc + ${ Expr.betaReduce('{ $f(row) }) }.## }
+            }
+        }
+
+    /** Whether every key read by `lhs` on `l` (shifted by `lShift`) equals the one read by `rhs` on `r`. */
+    def equal(lhs: Key[?] => Expr[Column[?]], lShift: Int, rhs: Key[?] => Expr[Column[?]], rShift: Int)
+        : Expr[(Product, Product) => Boolean] =
+        '{ (l: Product, r: Product) =>
+            ${
+                keys.map: key =>
+                    import key.tpe
+                    def compile(side: Key[?] => Expr[Column[?]], shift: Int) =
+                        QuotedColumnCompiler(shift).compile(side(key).asInstanceOf[Expr[Column[key.tpe.Underlying]]])
+                    val (fl, fr) = (compile(lhs, lShift), compile(rhs, rShift))
+                    '{ ${ Expr.betaReduce('{ $fl(l) }) } == ${ Expr.betaReduce('{ $fr(r) }) } }
+                .reduceOption((a, b) => '{ $a && $b }).getOrElse(Expr(true))
+            }
+        }
 
     val residualFn = residual.reduceOption((l, r) => '{ Column.And($l, $r) }) match
         case Some(c) => '{ Some(${ QuotedColumnCompiler.compile(c) }) }
         case None    => '{ None }
-    '{ HashKeys(${ key(keys.map(_._1), 0) }, ${ key(keys.map(_._2), leftArity) }, $residualFn) }
+    '{
+        HashKeys(
+            ${ hash(_.left, 0) },
+            ${ hash(_.right, leftArity) },
+            ${ equal(_.left, 0, _.right, leftArity) },
+            ${ equal(_.right, leftArity, _.right, leftArity) },
+            $residualFn
+        )
+    }
 
 /** The conjuncts of a predicate: `a && (b && c)` gives `a`, `b`, `c`. */
 private def splitAnd(using Quotes)(col: Expr[Column[Boolean]]): List[Expr[Column[Boolean]]] =
