@@ -1,6 +1,7 @@
 package tubes
 
 case class User(id: Int, name: String, age: Int)
+case class Order(orderId: Int, userId: Int, amount: Int)
 
 /** Rows read from a `Seq[User]`. */
 type UserRow = NamedTuple.From[User]
@@ -46,3 +47,19 @@ def nextYear(users: Plan[UserRow]) =
 
     val points = from[(x: Int, y: Int)].filter($.x < $.y).select(Tuple1(($.x + $.y).as("sum")))
     println(points)
+
+    // Joins see both inputs through `$left` and `$right`; equalities between them become the hash keys.
+    val orders = List(
+        Order(10, 1, 25),
+        Order(11, 4, 120),
+        Order(12, 1, 300),
+        Order(13, 3, 15)
+    )
+
+    val bigSpenders = from(people)
+        .through(adults)
+        .join(from(orders))(($left.id === $right.userId) && ($right.amount > 20))
+        .select(($.name, $.orderId, $.amount))
+
+    println(bigSpenders)
+    for row <- bigSpenders.materialize(RowKernel()) do println(s"${row.name} ordered #${row.orderId} for ${row.amount}")

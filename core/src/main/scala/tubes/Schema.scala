@@ -27,14 +27,25 @@ object Schema:
     inline given namedTuple[NT <: AnyNamedTuple]: Schema[NT] = of[NT]
 
     def refImpl[NT <: AnyNamedTuple: Type](self: Expr[Schema[NT]], name: Expr[String])(using Quotes): Expr[Column[?]] =
+        staticRef[NT](name, 0).getOrElse('{ $self.ref($name) })
+
+    /** `Column.Ref[A, "foo"]("foo", offset + index)` when `NT` and `name` are known statically. */
+    private[tubes] def staticRef[NT <: AnyNamedTuple: Type](name: Expr[String], offset: Int)(using Quotes)
+        : Option[Expr[Column[?]]] =
         import quotes.reflect.*
         (tupleElements(TypeRepr.of[Names[NT]]), tupleElements(TypeRepr.of[DropNames[NT]]), name.value) match
             case (Some(names), Some(types), Some(n)) =>
                 val index = names.indexWhere(_ =:= ConstantType(StringConstant(n)))
                 (types(index).asType, ConstantType(StringConstant(n)).asType) match
-                    case ('[a], '[type label <: String; label]) => '{ Column.Ref[a, label]($name, ${ Expr(index) }) }
-                    case _                                       => '{ $self.ref($name) }
-            case _ => '{ $self.ref($name) }
+                    case ('[a], '[type label <: String; label]) =>
+                        Some('{ Column.Ref[a, label]($name, ${ Expr(offset + index) }) })
+                    case _ => None
+            case _ => None
+
+    /** Number of fields of `NT`, when statically known. */
+    private[tubes] def arity[NT <: AnyNamedTuple: Type](using Quotes): Option[Int] =
+        import quotes.reflect.*
+        tupleElements(TypeRepr.of[Names[NT]]).map(_.size)
 
     /** Element types of a tuple type written either as `TupleN[..]` or as a `*:` chain. */
     private[tubes] def tupleElements(using Quotes)(tpe: quotes.reflect.TypeRepr): Option[List[quotes.reflect.TypeRepr]] =
