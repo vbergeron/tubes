@@ -65,6 +65,13 @@ class OptionSuite extends munit.FunSuite:
         val optional: Column[Option[Boolean]] = $.age > $.age.default(0)
         assert(compiletime.testing.typeChecks("""val c: Column[Boolean] = $.age > 1""") == false)
 
+    test("operators reject operands of another value type"):
+        given Schema[NamedTuple.From[Person]] = Schema.derived[Person]
+        val errors = compiletime.testing.typeCheckErrors("""$.age + 1.5""")
+        assert(errors.map(_.message).exists(_.startsWith("Cannot combine Double values with a column of")), errors)
+        assert(!compiletime.testing.typeChecks("""$.age + $.name"""))
+        assert(!compiletime.testing.typeChecks("""$.age < "x" """))
+
     test("isNone tells missing values apart"):
         val plan = from(people).filter($.age.isNone || $.nickname.isNone).select(Tuple1($.name))
         assertEquals(plan.materialize(RowKernel()).map(_.name), List("bob", "carol"))

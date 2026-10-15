@@ -39,7 +39,8 @@ final class JoinedRow(val left: Product, val right: Product, leftArity: Int) ext
     override def toString: String = productIterator.mkString("JoinedRow(", ", ", ")")
 
 /** A row of an outer join: the fields of `left`, then those of `right`, read in place. Fields of an optional side are
-  * wrapped in `Some`, or `None` where that side is missing (`null`).
+  * wrapped in `Some`, or `None` where that side is missing (`null`); those already optional, as `leftOptions` and
+  * `rightOptions` tell, are kept as they are.
   */
 final class OuterRow(
     val left: Product,
@@ -47,22 +48,25 @@ final class OuterRow(
     leftArity: Int,
     rightArity: Int,
     optionalLeft: Boolean,
-    optionalRight: Boolean
+    optionalRight: Boolean,
+    leftOptions: IArray[Boolean],
+    rightOptions: IArray[Boolean]
 ) extends Product:
     def productArity: Int = leftArity + rightArity
 
     def productElement(n: Int): Any =
-        if n < leftArity then OuterRow.field(left, n, optionalLeft)
-        else OuterRow.field(right, n - leftArity, optionalRight)
+        if n < leftArity then OuterRow.field(left, n, optionalLeft, leftOptions)
+        else OuterRow.field(right, n - leftArity, optionalRight, rightOptions)
 
     def canEqual(that: Any): Boolean = false
 
     override def toString: String = productIterator.mkString("OuterRow(", ", ", ")")
 
 object OuterRow:
-    private def field(side: Product, n: Int, optional: Boolean): Any =
+    private def field(side: Product, n: Int, optional: Boolean, options: IArray[Boolean]): Any =
         if !optional then side.productElement(n)
         else if side == null then None
+        else if options(n) then side.productElement(n)
         else Some(side.productElement(n))
 
 /** A join condition compiled for a hash join: equalities between a left and a right expression become the hash keys.

@@ -36,21 +36,24 @@ object RowKernel:
     private def hashJoin(j: JoinSpec[?]): Iterator[Product] =
         val table   = HashTable(rows(j.right), j.keys)
         val matched = if j.kind.keepsRight then new Array[Boolean](table.rows.length) else null
-        val shape   = Shape(j.kind, j.left.schema.names.length, j.right.schema.names.length)
+        val shape   = Shape(j)
         val joined  = Probe(rows(j.left), table, j.keys, shape, matched)
         if matched == null then joined
         else
             joined ++ Iterator.range(0, table.rows.length).filterNot(matched).map(i => shape.row(null, table.rows(i)))
 
     /** How a join lays out its output rows. */
-    private final class Shape(kind: JoinKind, val leftArity: Int, rightArity: Int):
+    private final class Shape(j: JoinSpec[?]):
+        private val kind       = j.kind
+        val leftArity: Int     = j.left.schema.names.length
+        private val rightArity = j.right.schema.names.length
         val inner: Boolean     = kind == JoinKind.Inner
         val keepsLeft: Boolean = kind.keepsLeft
 
         /** A row of `left` and `right`, either of which may be `null` where `kind` keeps unmatched rows. */
         def row(left: Product, right: Product): Product =
             if inner then JoinedRow(left, right, leftArity)
-            else OuterRow(left, right, leftArity, rightArity, kind.keepsRight, kind.keepsLeft)
+            else OuterRow(left, right, leftArity, rightArity, kind.keepsRight, kind.keepsLeft, j.leftOptions, j.rightOptions)
 
     /** Right rows grouped by key, in flat arrays. Each bucket chains its groups through `groupNext`, starting at
       * `heads`; each group chains its rows through `rowNext`, in input order, starting at `groupFirst`. `-1` ends a chain.

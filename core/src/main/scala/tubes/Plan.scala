@@ -60,7 +60,15 @@ object Plan:
             inline condition: JoinSchemas[Out, R] ?=> Column[Boolean]
         ): Plan[J] =
             val schemas = JoinSchemas(plan.schema, RightSchema[Out, R](right.schema, plan.schema.names.length))
-            JoinSpec[J](plan, right, kind, condition(using schemas), compileJoin[Out, R](condition))
+            JoinSpec[J](
+                plan,
+                right,
+                kind,
+                condition(using schemas),
+                compileJoin[Out, R](condition),
+                optionFields[DropNames[Out]],
+                optionFields[DropNames[R]]
+            )
 
         /** Applies a reusable step to this plan. */
         def through[B <: AnyNamedTuple](step: Plan[Out] => Plan[B]): Plan[B] = step(plan)
@@ -106,8 +114,23 @@ final class SelectSpec[Out <: AnyNamedTuple](
     override def toString: String =
         schema.names.zip(columns).map((n, c) => s"$n = $c").mkString(s"SelectSpec($input, ", ", ", ")")
 
+/** `A` made optional: `Option[A]`, or `A` itself if it already is one. There is a single level of absence, as SQL's
+  * `NULL`, so a missing optional value is `None` too.
+  */
+type Nullable[A] = A match
+    case Option[x] => Option[x]
+    case _         => Option[A]
+
 /** The fields of `NT`, each made optional. */
-type Optional[NT <: AnyNamedTuple] = NamedTuple.NamedTuple[Names[NT], Tuple.Map[DropNames[NT], Option]]
+type Optional[NT <: AnyNamedTuple] = NamedTuple.NamedTuple[Names[NT], Tuple.Map[DropNames[NT], Nullable]]
+
+/** Which of the fields `T` are already optional, so an outer join does not wrap them again. */
+private[tubes] inline def optionFields[T <: Tuple]: IArray[Boolean] = IArray.from(optionFieldList[T])
+
+private inline def optionFieldList[T <: Tuple]: List[Boolean] = inline compiletime.erasedValue[T] match
+    case _: EmptyTuple          => Nil
+    case _: (Option[?] *: rest) => true :: optionFieldList[rest]
+    case _: (? *: rest)         => false :: optionFieldList[rest]
 
 /** Which unmatched rows a join keeps besides the matching pairs: none, the left ones, the right ones or both. */
 enum JoinKind(val keepsLeft: Boolean, val keepsRight: Boolean):
@@ -118,14 +141,17 @@ enum JoinKind(val keepsLeft: Boolean, val keepsRight: Boolean):
 
 /** Pairs the rows of `left` and `right` for which `condition` holds, plus the unmatched rows `kind` keeps; the output
   * rows hold the left fields followed by the right ones, optional on the sides an outer join may leave missing.
-  * `keys` compiles `condition` for a hash join.
+  * `keys` compiles `condition` for a hash join. `leftOptions` and `rightOptions` tell which input fields are already
+  * optional, so they stay as they are on a side an outer join makes optional.
   */
 final class JoinSpec[Out <: AnyNamedTuple](
     val left: Plan[?],
     val right: Plan[?],
     val kind: JoinKind,
     val condition: Column[Boolean],
-    val keys: HashKeys
+    val keys: HashKeys,
+    val leftOptions: IArray[Boolean],
+    val rightOptions: IArray[Boolean]
 ) extends Plan[Out]:
     val schema: Schema[Out] = new Schema(left.schema.names ++ right.schema.names)
 

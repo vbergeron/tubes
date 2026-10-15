@@ -21,13 +21,13 @@ def QuotedColumnCompiler(shift: Int)(using Quotes): Column.Compiler[Expr] = new 
             '{ (row: Product) => row.productElement($at).asInstanceOf[A] }
         case '{ type n <: String; Column.Alias[A, n]($c, $name) }   => typed(c)
         case '{ Column.Lit[A]($value) }              => '{ (row: Product) => $value }
-        case '{ Column.Arith[b, l, r, A]($op, $lc, $rc, $num, $lift) } =>
+        case '{ Column.Arith[b, l, r, A]($op, $lc, $rc, $num) } =>
             lifted[l, r, b, b, A](typed(lc), typed(rc)): (x, y) =>
                 op match
                     case '{ ArithOp.Plus }  => '{ $num.plus($x, $y) }
                     case '{ ArithOp.Minus } => '{ $num.minus($x, $y) }
                     case '{ ArithOp.Times } => '{ $num.times($x, $y) }
-        case '{ Column.Compare[b, l, r, A]($op, $lc, $rc, $ord, $lift) } =>
+        case '{ Column.Compare[b, l, r, A]($op, $lc, $rc, $ord) } =>
             lifted[l, r, b, Boolean, A](typed(lc), typed(rc)): (x, y) =>
                 op match
                     case '{ CmpOp.Lt } => '{ $ord.lt($x, $y) }

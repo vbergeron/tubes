@@ -77,12 +77,10 @@ class OuterJoinSuite extends munit.FunSuite:
             )
         )
 
-    test("optional fields of an outer join nest their options"):
+    test("already optional fields of an outer join stay single options"):
         val plan = from(stocks).leftJoin(from(stores))($left.store === $right.storeName).select(($.qty, $.city))
-        assertEquals(
-            plan.materialize(RowKernel()).map(_.city),
-            List(Some(Some("Lyon")), None, None, None)
-        )
+        val cities: List[Option[String]] = plan.materialize(RowKernel()).map(_.city)
+        assertEquals(cities, List(Some("Lyon"), None, None, None))
 
     test("outer joins materialize as flat tuples, and their optional columns take defaults"):
         val plan = from(items).leftJoin(from(stocks))($left.sku === $right.skuRef)
@@ -101,7 +99,7 @@ class OuterJoinSuite extends munit.FunSuite:
         assertEquals(
             plan.materialize(RowKernel()),
             List(
-                (sku = 1, city = Some(Some("Lyon"))),
+                (sku = 1, city = Some("Lyon")),
                 (sku = 1, city = None),
                 (sku = 2, city = None),
                 (sku = 3, city = None)
