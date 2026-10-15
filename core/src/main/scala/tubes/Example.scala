@@ -58,8 +58,7 @@ def nextYear(users: Plan[UserRow]) =
 
     val bigSpenders = from(people)
         .through(adults)
-        .join(from(orders))
-        .on(($left.id === $right.userId) && ($right.amount > 20))
+        .join(from(orders))(($left.id === $right.userId) && ($right.amount > 20))
         .select(($.name, $.orderId, $.amount))
 
     println(bigSpenders)

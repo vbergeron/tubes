@@ -17,7 +17,7 @@ class JoinSuite extends munit.FunSuite:
     val stores = List(Store("north", "Lyon"), Store("south", "Nice"))
 
     test("joins on one key, keeping left order and every match"):
-        val plan = from(items).join(from(stocks)).on($left.sku === $right.skuRef).select(($.size, $.store))
+        val plan = from(items).join(from(stocks))($left.sku === $right.skuRef).select(($.size, $.store))
         assertEquals(
             plan.materialize(RowKernel()),
             for size <- List(10, 12); store <- List("north", "south", "north") yield (size = size, store = store)
@@ -25,8 +25,7 @@ class JoinSuite extends munit.FunSuite:
 
     test("joins on a composite key, written either way round, with a residual predicate"):
         val plan = from(items)
-            .join(from(stocks))
-            .on(($right.colorRef === $left.color) && ($left.sku === $right.skuRef) && ($right.qty > $left.size - 10))
+            .join(from(stocks))(($right.colorRef === $left.color) && ($left.sku === $right.skuRef) && ($right.qty > $left.size - 10))
             .select(($.size, $.store, $.qty))
         assertEquals(
             plan.materialize(RowKernel()),
@@ -34,27 +33,25 @@ class JoinSuite extends munit.FunSuite:
         )
 
     test("hashes on the equalities and leaves the rest to the residual"):
-        val plan = from(items).join(from(stocks)).on(($right.colorRef === $left.color) && ($left.sku === $right.skuRef))
+        val plan = from(items).join(from(stocks))(($right.colorRef === $left.color) && ($left.sku === $right.skuRef))
         val keys = plan.asInstanceOf[JoinSpec[?, ?]].keys
         assertEquals(keys.leftKey(items.head), ("red", 1))
         assertEquals(keys.rightKey(stocks.head), ("red", 1))
         assertEquals(keys.residual, None)
 
     test("joins without equalities pair every row, then filter"):
-        val plan = from(items).join(from(stores)).on($left.size > 9).select(($.sku, $.city))
+        val plan = from(items).join(from(stores))($left.size > 9).select(($.sku, $.city))
         assertEquals(plan.materialize(RowKernel()).size, 4)
 
     test("materializes joined rows as flat tuples"):
-        val plan = from(stores).join(from(stocks)).on($left.storeName === $right.store && $right.qty === 7)
+        val plan = from(stores).join(from(stocks))($left.storeName === $right.store && $right.qty === 7)
         assertEquals(plan.materialize(RowKernel()), List(("north", "Lyon", "north", 3, "red", 7)))
         assertEquals(plan.schema.names.toList, List("storeName", "city", "store", "skuRef", "colorRef", "qty"))
 
     test("joins chain, and `$` sees the joined schema"):
         val plan = from(items)
-            .join(from(stocks))
-            .on($left.sku === $right.skuRef && $left.color === $right.colorRef)
-            .join(from(stores))
-            .on($left.store === $right.storeName)
+            .join(from(stocks))($left.sku === $right.skuRef && $left.color === $right.colorRef)
+            .join(from(stores))($left.store === $right.storeName)
             .filter($.qty > 0)
             .select(($.color, $.city, ($.qty * 2).as("double")))
         assertEquals(
@@ -63,5 +60,5 @@ class JoinSuite extends munit.FunSuite:
         )
 
     test("rejects joins whose field names clash"):
-        val errors = typeCheckErrors("from(items).join(from(items)).on($left.sku === $right.sku)")
+        val errors = typeCheckErrors("from(items).join(from(items))($left.sku === $right.sku)")
         assert(errors.exists(_.message.contains("their field names overlap")), errors.map(_.message))

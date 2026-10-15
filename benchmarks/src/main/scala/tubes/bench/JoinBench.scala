@@ -52,20 +52,17 @@ class JoinBench:
     def setup(): Unit =
         diamonds = Diamonds.load()
         smallBuild = from(diamonds)
-            .join(from(Grades.cuts))
-            .on($left.cut === $right.cutName)
+            .join(from(Grades.cuts))($left.cut === $right.cutName)
             .filter($.cutRank >= 4)
             .select(($.carat, $.price, $.cutRank))
         compositeKey = from(diamonds)
-            .join(from(Grades.grades))
-            .on(
+            .join(from(Grades.grades))(
                 ($left.cut === $right.gradeCut) && ($left.color === $right.gradeColor) &&
                     ($left.clarity === $right.gradeClarity) && ($left.price > $right.minPrice)
             )
             .select(($.carat, $.price, $.minPrice))
         largeBuild = from(Grades.cuts)
-            .join(from(diamonds))
-            .on($left.cutName === $right.cut)
+            .join(from(diamonds))($left.cutName === $right.cut)
             .select(($.cutRank, $.price))
         check("smallBuild", handWrittenSmallBuild(), rowKernelSmallBuild())
         check("compositeKey", handWrittenCompositeKey(), rowKernelCompositeKey())

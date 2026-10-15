@@ -18,8 +18,16 @@ object Plan:
         inline def select[Cols](inline columns: Schema[Out] ?=> Cols)(using p: Projection[Cols]): Plan[p.Out] =
             SelectSpec[p.Out](plan, p.columns(columns(using plan.schema)), compileProjection(columns))
 
-        /** Starts a join with `right`; `.on(condition)` completes it. */
-        def join[R <: AnyNamedTuple](right: Plan[R]): JoinBuilder[Out, R] = JoinBuilder(plan, right)
+        /** Pairs every row with the `right` rows for which `condition` holds, written with `$left` and `$right`. The
+          * joined rows have this plan's fields followed by the right ones, so the field names must not clash: rename
+          * them with a `select` beforehand if they do.
+          */
+        inline def join[R <: AnyNamedTuple](right: Plan[R])(inline condition: JoinSchemas[Out, R] ?=> Column[Boolean])(
+            using @implicitNotFound("Cannot join ${Out} with ${R}: their field names overlap, rename them with select first")
+            disjoint: Tuple.Disjoint[Names[Out], Names[R]] =:= true
+        ): Plan[NamedTuple.Concat[Out, R]] =
+            val schemas = JoinSchemas(plan.schema, RightSchema[Out, R](right.schema, plan.schema.names.length))
+            JoinSpec[Out, R](plan, right, condition(using schemas), compileJoin[Out, R](condition))
 
         /** Applies a reusable step to this plan. */
         def through[B <: AnyNamedTuple](step: Plan[Out] => Plan[B]): Plan[B] = step(plan)
@@ -64,23 +72,6 @@ final class SelectSpec[Out <: AnyNamedTuple](
 
     override def toString: String =
         schema.names.zip(columns).map((n, c) => s"$n = $c").mkString(s"SelectSpec($input, ", ", ", ")")
-
-/** A join waiting for its condition. */
-final class JoinBuilder[L <: AnyNamedTuple, R <: AnyNamedTuple](val left: Plan[L], val right: Plan[R])
-
-object JoinBuilder:
-    extension [L <: AnyNamedTuple, R <: AnyNamedTuple](builder: JoinBuilder[L, R])
-        /** Pairs every left row with the right rows for which `condition` holds, written with `$left` and `$right`.
-          * The joined rows have the left fields followed by the right ones, so the field names must not clash: rename
-          * them with a `select` beforehand if they do.
-          */
-        inline def on(inline condition: JoinSchemas[L, R] ?=> Column[Boolean])(
-            using @implicitNotFound("Cannot join ${L} with ${R}: their field names overlap, rename them with select first")
-            disjoint: Tuple.Disjoint[Names[L], Names[R]] =:= true
-        ): Plan[NamedTuple.Concat[L, R]] =
-            val (left, right) = (builder.left, builder.right)
-            val schemas = JoinSchemas(left.schema, RightSchema[L, R](right.schema, left.schema.names.length))
-            JoinSpec[L, R](left, right, condition(using schemas), compileJoin[L, R](condition))
 
 /** Pairs the rows of `left` and `right` for which `condition` holds; the output rows hold the left fields followed by
   * the right ones. `keys` compiles `condition` for a hash join.
