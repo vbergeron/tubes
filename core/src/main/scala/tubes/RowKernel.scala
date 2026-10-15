@@ -24,6 +24,8 @@ object RowKernel:
         case s: SelectSpec[?] => rows(s.input).map(s.compiled)
         case j: JoinSpec[?]   => hashJoin(j)
         case g: GroupBySpec[?] => group(g)
+        case t: TakeSpec[?]    => rows(t.input).take(t.count)
+        case s: SkipSpec[?]    => rows(s.input).drop(s.count)
 
     /** Whether `plan`'s rows are already `Out` tuples; otherwise they are still a source's own values. */
     private def yieldsTuples(plan: Plan[?]): Boolean = plan match
@@ -32,6 +34,8 @@ object RowKernel:
         case _: SelectSpec[?] => true
         case _: JoinSpec[?]   => false
         case _: GroupBySpec[?] => true
+        case t: TakeSpec[?]    => yieldsTuples(t.input)
+        case s: SkipSpec[?]    => yieldsTuples(s.input)
 
     /** Folds every input row into the accumulators of its group, then emits one row per group: its key fields, then
       * its aggregated values. Groups come out in order of their first row.
