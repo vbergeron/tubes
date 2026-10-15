@@ -107,13 +107,18 @@ private def compileJoinImpl[L <: AnyNamedTuple: Type, R <: AnyNamedTuple: Type](
     val keys     = equalities.collect { case Right(key) => key }
     val residual = equalities.collect { case Left(c) => c }
 
+    /** Compiles the side of `key` that `side` picks, against rows shifted by `shift`. */
+    def compileKey(key: Key[?], side: Key[?] => Expr[Column[?]], shift: Int): Expr[Product => key.tpe.Underlying] =
+        import key.tpe
+        QuotedColumnCompiler(shift).compile(side(key).asInstanceOf[Expr[Column[key.tpe.Underlying]]])
+
     /** Combines the hashes of the key columns read by `side`, as compiled against rows shifted by `shift`. */
     def hash(side: Key[?] => Expr[Column[?]], shift: Int): Expr[Product => Int] =
         '{ (row: Product) =>
             ${
                 keys.foldLeft(Expr(0)): (acc, key) =>
                     import key.tpe
-                    val f = QuotedColumnCompiler(shift).compile(side(key).asInstanceOf[Expr[Column[key.tpe.Underlying]]])
+                    val f = compileKey(key, side, shift)
                     '{ 31 * $acc + ${ Expr.betaReduce('{ $f(row) }) }.## }
             }
         }
@@ -125,9 +130,7 @@ private def compileJoinImpl[L <: AnyNamedTuple: Type, R <: AnyNamedTuple: Type](
             ${
                 keys.map: key =>
                     import key.tpe
-                    def compile(side: Key[?] => Expr[Column[?]], shift: Int) =
-                        QuotedColumnCompiler(shift).compile(side(key).asInstanceOf[Expr[Column[key.tpe.Underlying]]])
-                    val (fl, fr) = (compile(lhs, lShift), compile(rhs, rShift))
+                    val (fl, fr) = (compileKey(key, lhs, lShift), compileKey(key, rhs, rShift))
                     '{ ${ Expr.betaReduce('{ $fl(l) }) } == ${ Expr.betaReduce('{ $fr(r) }) } }
                 .reduceOption((a, b) => '{ $a && $b }).getOrElse(Expr(true))
             }
@@ -154,16 +157,7 @@ private def splitAnd(using Quotes)(col: Expr[Column[Boolean]]): List[Expr[Column
 
 /** Indices of the fields an expression reads, or `None` if some are not known statically. */
 private def refIndices(using Quotes)(col: Expr[Column[?]]): Option[List[Int]] =
-    def both(l: Expr[Column[?]], r: Expr[Column[?]]) = refIndices(l).zip(refIndices(r)).map(_ ++ _)
     stripColumn(col) match
         case '{ type n <: String; Column.Ref[a, n]($name, $index) } => index.value.map(List(_))
-        case '{ type n <: String; Column.Alias[a, n]($c, $name) }   => refIndices(c)
-        case '{ Column.Lit[a]($value) }                             => Some(Nil)
-        case '{ Column.Arith[a]($op, $l, $r, $num) }                => both(l, r)
-        case '{ Column.Compare[a]($op, $l, $r, $ord) }              => both(l, r)
-        case '{ Column.Equal[a]($l, $r) }                           => both(l, r)
-        case '{ Column.And($l, $r) }                                => both(l, r)
-        case '{ Column.Or($l, $r) }                                 => both(l, r)
-        case '{ Column.Not($c) }                                    => refIndices(c)
-        case '{ Column.Default[a]($c, $value) }                     => both(c, value)
-        case _                                                      => None
+        case c =>
+            children(c).flatMap(_.foldRight(Option(List.empty[Int]))((child, acc) => refIndices(child).zip(acc).map(_ ++ _)))

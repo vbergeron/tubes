@@ -55,16 +55,59 @@ def QuotedColumnCompiler(shift: Int)(using Quotes): Column.Compiler[Expr] = new 
             }
         case _ => quotes.reflect.report.errorAndAbort(s"Cannot compile column expression ${expr.show}", expr)
 
-/** Drops what inlining and `Selectable` leave around constructor calls: inlined wrappers, ascriptions and casts. */
+/** Drops what inlining, `Selectable` and named tuples leave around an expression: ascriptions, casts, and inlined
+  * wrappers or blocks binding local vals, whose result it follows through those vals. Aborts if what remains still
+  * reads one of them.
+  */
+private[tubes] def peel(using Quotes)(term: quotes.reflect.Term): quotes.reflect.Term =
+    import quotes.reflect.*
+    def isVal(stat: Statement) = stat match
+        case ValDef(_, _, Some(_)) => true
+        case _                     => false
+    def bind(stats: List[Statement], locals: Map[Symbol, Term]) =
+        locals ++ stats.collect { case v @ ValDef(_, _, Some(rhs)) => v.symbol -> rhs }
+    def loop(t: Term, locals: Map[Symbol, Term]): (Term, Map[Symbol, Term]) = t match
+        case Inlined(_, stats, body) if stats.forall(isVal)                => loop(body, bind(stats, locals))
+        case Block(stats, body) if stats.forall(isVal)                     => loop(body, bind(stats, locals))
+        case Typed(body, _)                                                => loop(body, locals)
+        case TypeApply(Select(body, "asInstanceOf" | "$asInstanceOf$"), _) => loop(body, locals)
+        case id: Ident if locals.contains(id.symbol)                       => loop(locals(id.symbol), locals)
+        case _                                                             => (t, locals)
+    val (peeled, locals) = loop(term, Map.empty)
+    val readsLocal = new TreeAccumulator[Boolean]:
+        def foldTree(found: Boolean, tree: Tree)(owner: Symbol): Boolean = found || (tree match
+            case id: Ident => locals.contains(id.symbol)
+            case _         => foldOverTree(false, tree)(owner))
+    if readsLocal.foldTree(false, peeled)(Symbol.spliceOwner) then
+        report.errorAndAbort(s"Cannot read ${peeled.show}: it depends on local definitions", term.pos)
+    peeled
+
+/** Same as `peel`, for column expressions. */
 private[tubes] def stripColumn[C <: Column[?]](using Quotes)(expr: Expr[C]): Expr[C] =
     import quotes.reflect.*
-    def loop(t: Term): Term = t match
-        case Inlined(_, Nil, body)                                         => loop(body)
-        case Typed(body, _)                                                => loop(body)
-        case Block(Nil, body)                                              => loop(body)
-        case TypeApply(Select(body, "asInstanceOf" | "$asInstanceOf$"), _) => loop(body)
-        case _                                                             => t
-    loop(expr.asTerm).asExpr.asInstanceOf[Expr[C]]
+    peel(expr.asTerm).asExpr.asInstanceOf[Expr[C]]
+
+/** The columns a `Column` constructor call is built from, such as both sides of an `Arith`; `None` if `col` is not
+  * such a call. Analyses of column trees recurse through this rather than listing every constructor.
+  */
+private[tubes] def children(using Quotes)(col: Expr[Column[?]]): Option[List[Expr[Column[?]]]] =
+    import quotes.reflect.*
+    val columnCases = Symbol.requiredModule("tubes.Column").moduleClass
+    /** The declared parameter types of the case constructor `fun` calls, before its type arguments are applied. */
+    def constructorParams(fun: Term): Option[List[TypeRepr]] = fun match
+        case TypeApply(f, _) => constructorParams(f)
+        case _ if fun.symbol.name == "apply" && fun.symbol.owner.companionClass.maybeOwner == columnCases =>
+            fun.tpe.widen match
+                case PolyType(_, _, MethodType(_, params, _)) => Some(params)
+                case MethodType(_, params, _)                 => Some(params)
+                case _                                        => None
+        case _ => None
+    stripColumn(col).asTerm match
+        case Apply(fun, args) =>
+            constructorParams(fun).map: params =>
+                params.zip(args).collect:
+                    case (param, arg) if param <:< TypeRepr.of[Column[?]] => arg.asExprOf[Column[?]]
+        case _ => None
 
 /** Compiles `col` into a row function at compile time; it must be written with `Column` constructors. */
 inline def compileColumn[A](inline col: Column[A]): Product => A = ${ compileColumnImpl('col) }
@@ -91,22 +134,14 @@ private def compileProjectionImpl[S: Type, C: Type](step: Expr[S ?=> C])(using Q
 /** The body of a step lambda; the columns inside it do not use the lambda's schema once `$.field` is resolved. */
 private[tubes] def stepBody(using Quotes)(step: Expr[Any]): Expr[Any] =
     import quotes.reflect.*
-    def loop(t: Term): Term = t match
-        case Inlined(_, Nil, body) => loop(body)
-        case Typed(body, _)        => loop(body)
-        case Block(Nil, body)      => loop(body)
-        case Lambda(_, body)       => body
-        case other                 => report.errorAndAbort(s"Expected a step lambda, got ${other.show}", other.pos)
-    loop(step.asTerm).asExpr
+    peel(step.asTerm) match
+        case Lambda(_, body) => body.asExpr
+        case other           => report.errorAndAbort(s"Expected a step lambda, got ${other.show}", other.pos)
 
 /** The elements of a tuple literal, plain or named. */
 private def tupleElements(using Quotes)(tuple: quotes.reflect.Term): List[Expr[Any]] =
     import quotes.reflect.*
-    tuple match
-        case Inlined(_, Nil, body)                                         => tupleElements(body)
-        case Typed(body, _)                                                => tupleElements(body)
-        case Block(Nil, body)                                              => tupleElements(body)
-        case TypeApply(Select(body, "asInstanceOf" | "$asInstanceOf$"), _) => tupleElements(body)
+    peel(tuple) match
         case Apply(TypeApply(Select(tupleN, "apply"), _), args) if tupleN.symbol.fullName.startsWith("scala.Tuple") =>
             args.map(_.asExpr)
         case other => report.errorAndAbort(s"Expected a tuple of columns, got ${other.show}", other.pos)
