@@ -47,6 +47,12 @@ def QuotedColumnCompiler(shift: Int)(using Quotes): Column.Compiler[Expr] = new 
         case '{ Column.Not($c) }                     =>
             val f = typed(c)
             '{ (row: Product) => !$f(row) }.asExprOf[Product => A]
+        case '{ Column.Default[A]($c, $value) }      =>
+            val (fc, fv) = (typed(c), typed(value))
+            '{ (row: Product) => $fc(row) match
+                case Some(a) => a
+                case None    => $fv(row)
+            }
         case _ => quotes.reflect.report.errorAndAbort(s"Cannot compile column expression ${expr.show}", expr)
 
 /** Drops what inlining and `Selectable` leave around constructor calls: inlined wrappers, ascriptions and casts. */
