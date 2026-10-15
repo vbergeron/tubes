@@ -40,6 +40,14 @@ class JoinSuite extends munit.FunSuite:
         assert(!keys.matches(items.head, stocks(2)))
         assertEquals(keys.residual, None)
 
+    test("computed expressions on one side are hash keys too"):
+        val plan = from(items).join(from(stocks))(($left.sku + 2) === ($right.skuRef + 1) && !($right.qty === 0))
+        val keys = plan.asInstanceOf[JoinSpec[?]].keys
+        assert(keys.matches(items(2), stocks.last))
+        assert(!keys.matches(items.head, stocks.head))
+        assert(keys.residual.isDefined)
+        assertEquals(plan.select(($.size, $.store)).materialize(RowKernel()), List((size = 8, store = "north")))
+
     test("joins without equalities pair every row, then filter"):
         val plan = from(items).join(from(stores))($left.size > 9).select(($.sku, $.city))
         assertEquals(plan.materialize(RowKernel()).size, 4)
