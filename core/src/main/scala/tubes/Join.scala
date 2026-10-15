@@ -38,6 +38,33 @@ final class JoinedRow(val left: Product, val right: Product, leftArity: Int) ext
 
     override def toString: String = productIterator.mkString("JoinedRow(", ", ", ")")
 
+/** A row of an outer join: the fields of `left`, then those of `right`, read in place. Fields of an optional side are
+  * wrapped in `Some`, or `None` where that side is missing (`null`).
+  */
+final class OuterRow(
+    val left: Product,
+    val right: Product,
+    leftArity: Int,
+    rightArity: Int,
+    optionalLeft: Boolean,
+    optionalRight: Boolean
+) extends Product:
+    def productArity: Int = leftArity + rightArity
+
+    def productElement(n: Int): Any =
+        if n < leftArity then OuterRow.field(left, n, optionalLeft)
+        else OuterRow.field(right, n - leftArity, optionalRight)
+
+    def canEqual(that: Any): Boolean = false
+
+    override def toString: String = productIterator.mkString("OuterRow(", ", ", ")")
+
+object OuterRow:
+    private def field(side: Product, n: Int, optional: Boolean): Any =
+        if !optional then side.productElement(n)
+        else if side == null then None
+        else Some(side.productElement(n))
+
 /** A join condition compiled for a hash join: equalities between a left and a right expression become the hash keys.
   * `leftHash` and `rightHash` hash the keys of left and right rows alike, `matches` compares a left key with a right one,
   * `sameKey` two right ones, and `residual` checks whatever else the condition requires on joined rows.

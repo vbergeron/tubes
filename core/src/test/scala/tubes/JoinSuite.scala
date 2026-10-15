@@ -34,7 +34,7 @@ class JoinSuite extends munit.FunSuite:
 
     test("hashes on the equalities and leaves the rest to the residual"):
         val plan = from(items).join(from(stocks))(($right.colorRef === $left.color) && ($left.sku === $right.skuRef))
-        val keys = plan.asInstanceOf[JoinSpec[?, ?]].keys
+        val keys = plan.asInstanceOf[JoinSpec[?]].keys
         assertEquals(keys.leftHash(items.head), keys.rightHash(stocks.head))
         assert(keys.matches(items.head, stocks.head))
         assert(!keys.matches(items.head, stocks(2)))

@@ -21,20 +21,36 @@ object RowKernel:
                 case None      => sys.error(s"RowKernel has no data bound for $s")
         case f: FilterSpec[?] => rows(f.input).filter(f.compiled)
         case s: SelectSpec[?] => rows(s.input).map(s.compiled)
-        case j: JoinSpec[?, ?] => hashJoin(j)
+        case j: JoinSpec[?]   => hashJoin(j)
 
     /** Whether `plan`'s rows are already `Out` tuples; otherwise they are still a source's own values. */
     private def yieldsTuples(plan: Plan[?]): Boolean = plan match
         case _: Scan[?]       => false
         case f: FilterSpec[?] => yieldsTuples(f.input)
         case _: SelectSpec[?] => true
-        case _: JoinSpec[?, ?] => false
+        case _: JoinSpec[?]   => false
 
-    /** Builds a hash table over the right rows, then streams the left rows through it, in order. */
-    private def hashJoin(j: JoinSpec[?, ?]): Iterator[Product] =
-        val table  = HashTable(rows(j.right), j.keys)
-        val joined = Probe(rows(j.left), table, j.keys, j.left.schema.names.length)
-        j.keys.residual.fold(joined)(joined.filter)
+    /** Builds a hash table over the right rows, then streams the left rows through it, in order. Outer joins then add
+      * the right rows that matched nothing.
+      */
+    private def hashJoin(j: JoinSpec[?]): Iterator[Product] =
+        val table   = HashTable(rows(j.right), j.keys)
+        val matched = if j.kind.keepsRight then new Array[Boolean](table.rows.length) else null
+        val shape   = Shape(j.kind, j.left.schema.names.length, j.right.schema.names.length)
+        val joined  = Probe(rows(j.left), table, j.keys, shape, matched)
+        if matched == null then joined
+        else
+            joined ++ Iterator.range(0, table.rows.length).filterNot(matched).map(i => shape.row(null, table.rows(i)))
+
+    /** How a join lays out its output rows. */
+    private final class Shape(kind: JoinKind, val leftArity: Int, rightArity: Int):
+        val inner: Boolean     = kind == JoinKind.Inner
+        val keepsLeft: Boolean = kind.keepsLeft
+
+        /** A row of `left` and `right`, either of which may be `null` where `kind` keeps unmatched rows. */
+        def row(left: Product, right: Product): Product =
+            if inner then JoinedRow(left, right, leftArity)
+            else OuterRow(left, right, leftArity, rightArity, kind.keepsRight, kind.keepsLeft)
 
     /** Right rows grouped by key, in flat arrays. Each bucket chains its groups through `groupNext`, starting at
       * `heads`; each group chains its rows through `rowNext`, in input order, starting at `groupFirst`. `-1` ends a chain.
@@ -80,20 +96,48 @@ object RowKernel:
 
     private def spread(h: Int): Int = h ^ (h >>> 16)
 
-    /** Pairs each left row with its matches in `table`, in order. */
-    private final class Probe(left: Iterator[Product], table: HashTable, keys: HashKeys, leftArity: Int)
-        extends Iterator[Product]:
-        private var row: Product = null
-        private var at: Int      = -1
+    /** Pairs each left row with its matches in `table` that pass the residual, in order. Where the join keeps unmatched
+      * left rows, emits those with no right side; where `matched` is given, marks the right rows it pairs.
+      */
+    private final class Probe(
+        left: Iterator[Product],
+        table: HashTable,
+        keys: HashKeys,
+        shape: Shape,
+        matched: Array[Boolean]
+    ) extends Iterator[Product]:
+        private val residual  = keys.residual.orNull
+        private val keepsLeft = shape.keepsLeft
+        private var row: Product     = null
+        private var at: Int          = -1
+        private var found: Boolean   = false
+        private var pending: Product = null
 
         def hasNext: Boolean =
-            while at < 0 && left.hasNext do
+            while pending == null && (row != null || left.hasNext) do advance()
+            pending != null
+
+        /** Moves to the next candidate pair, setting `pending` if it yields a row. */
+        private def advance(): Unit =
+            if row == null then
                 row = left.next()
                 at = table.find(row, spread(keys.leftHash(row)))
-            at >= 0
+                found = false
+            if at >= 0 then
+                val i = at
+                at = table.rowNext(at)
+                val right  = table.rows(i)
+                val joined = JoinedRow(row, right, shape.leftArity)
+                if residual == null || residual(joined) then
+                    found = true
+                    if matched != null then matched(i) = true
+                    pending = if shape.inner then joined else shape.row(row, right)
+            else
+                if keepsLeft && !found then pending = shape.row(row, null)
+                row = null
 
         def next(): Product =
             if !hasNext then Iterator.empty.next()
-            val joined = JoinedRow(row, table.rows(at), leftArity)
-            at = table.rowNext(at)
-            joined
+            val out = pending
+            pending = null
+            out
