@@ -7,7 +7,7 @@ import NamedTuple.{AnyNamedTuple, From}
   * `scan` yields rows in the source's own representation (e.g. case class instances): any `Product` whose elements are
   * laid out like `Row`. Kernels read them positionally, without converting them first.
   */
-trait Scanable[-S]:
+trait Scanable[S]:
     type Row <: AnyNamedTuple
     def schema(source: S): Schema[Row]
     def scan(source: S): Iterator[Product]
@@ -22,7 +22,7 @@ object Scanable:
             def scan(source: S)   = g(source)
 
     /** A sequence of case class values, one row per element, scanned as the values themselves. */
-    inline given seq[A <: Product]: Aux[Seq[A], From[A]] =
+    inline given seq[C[x] <: Seq[x], A <: Product]: Aux[C[A], From[A]] =
         val s = Schema.derived[A]
         make(_ => s, _.iterator)
 

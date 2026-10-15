@@ -56,3 +56,42 @@ inline def compileColumn[A](inline col: Column[A]): Product => A = ${ compileCol
 
 private def compileColumnImpl[A: Type](col: Expr[Column[A]])(using Quotes): Expr[Product => A] =
     QuotedColumnCompiler.compile(col)
+
+/** Compiles the column computed by a step lambda, such as a `filter` predicate written with `$`. */
+inline def compileStep[S, A](inline step: S ?=> Column[A]): Product => A = ${ compileStepImpl('step) }
+
+/** Compiles the tuple of columns computed by a `select` lambda into one function building the output row. */
+inline def compileProjection[S, C](inline step: S ?=> C): Product => Product = ${ compileProjectionImpl('step) }
+
+private def compileStepImpl[S: Type, A: Type](step: Expr[S ?=> Column[A]])(using Quotes): Expr[Product => A] =
+    QuotedColumnCompiler.compile(stepBody(step).asExprOf[Column[A]])
+
+private def compileProjectionImpl[S: Type, C: Type](step: Expr[S ?=> C])(using Quotes): Expr[Product => Product] =
+    import quotes.reflect.*
+    val compiled = tupleElements(stepBody(step).asTerm).map:
+        case '{ $c: Column[t] } => QuotedColumnCompiler.compile(c): Expr[Product => Any]
+        case other              => report.errorAndAbort(s"Not a column: ${other.show}", other)
+    '{ (row: Product) => ${ Expr.ofTupleFromSeq(compiled.map(f => Expr.betaReduce('{ $f(row) }))) }.asInstanceOf[Product] }
+
+/** The body of a step lambda; the columns inside it do not use the lambda's schema once `$.field` is resolved. */
+private def stepBody(using Quotes)(step: Expr[Any]): Expr[Any] =
+    import quotes.reflect.*
+    def loop(t: Term): Term = t match
+        case Inlined(_, Nil, body) => loop(body)
+        case Typed(body, _)        => loop(body)
+        case Block(Nil, body)      => loop(body)
+        case Lambda(_, body)       => body
+        case other                 => report.errorAndAbort(s"Expected a step lambda, got ${other.show}", other.pos)
+    loop(step.asTerm).asExpr
+
+/** The elements of a tuple literal, plain or named. */
+private def tupleElements(using Quotes)(tuple: quotes.reflect.Term): List[Expr[Any]] =
+    import quotes.reflect.*
+    tuple match
+        case Inlined(_, Nil, body)                                         => tupleElements(body)
+        case Typed(body, _)                                                => tupleElements(body)
+        case Block(Nil, body)                                              => tupleElements(body)
+        case TypeApply(Select(body, "asInstanceOf" | "$asInstanceOf$"), _) => tupleElements(body)
+        case Apply(TypeApply(Select(tupleN, "apply"), _), args) if tupleN.symbol.fullName.startsWith("scala.Tuple") =>
+            args.map(_.asExpr)
+        case other => report.errorAndAbort(s"Expected a tuple of columns, got ${other.show}", other.pos)

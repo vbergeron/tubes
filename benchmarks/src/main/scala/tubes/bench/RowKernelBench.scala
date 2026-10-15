@@ -16,17 +16,15 @@ type Result = (carat: Double, price: Int, volume: Double)
 class RowKernelBench:
 
     var diamonds: Vector[Diamond] = Vector.empty
-
-    /** Inline, so `materialize` sees the whole plan and compiles it at compile time. */
-    inline def query =
-        from(diamonds)
-            .filter(($.cut === "Ideal") && ($.price > 1000))
-            .select(($.carat, $.price, ($.x * $.y * $.z).as("volume")))
-            .filter($.volume > 50.0)
+    var query: Plan[Result]       = null
 
     @Setup
     def setup(): Unit =
         diamonds = Diamonds.load()
+        query = from(diamonds)
+            .filter(($.cut === "Ideal") && ($.price > 1000))
+            .select(($.carat, $.price, ($.x * $.y * $.z).as("volume")))
+            .filter($.volume > 50.0)
         val (expected, actual) = (handWritten(), rowKernel())
         require(expected == actual, s"interpreter disagrees: ${expected.size} vs ${actual.size} rows")
 
@@ -40,4 +38,4 @@ class RowKernelBench:
 
     @Benchmark
     def rowKernel(): List[Result] =
-        query.materialize(RowKernel)
+        query.materialize(RowKernel())
