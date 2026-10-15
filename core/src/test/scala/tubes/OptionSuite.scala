@@ -64,3 +64,13 @@ class OptionSuite extends munit.FunSuite:
         val plain: Column[Boolean]            = $.age.default(0) + 1 > 1
         val optional: Column[Option[Boolean]] = $.age > $.age.default(0)
         assert(compiletime.testing.typeChecks("""val c: Column[Boolean] = $.age > 1""") == false)
+
+    test("isNone tells missing values apart"):
+        val plan = from(people).filter($.age.isNone || $.nickname.isNone).select(Tuple1($.name))
+        assertEquals(plan.materialize(RowKernel()).map(_.name), List("bob", "carol"))
+        assertEquals(from(people).filter(!$.age.isNone).select(Tuple1($.name)).materialize(RowKernel()).map(_.name), List("alice", "carol"))
+
+    test("isNone works in a join residual"):
+        val pets = List(Pet(Some("alice"), "cat"), Pet(None, "stray"))
+        val plan = from(people).join(from(pets))($left.age.isNone && $right.owner.isNone).select(($.name, $.pet))
+        assertEquals(plan.materialize(RowKernel()), List((name = "bob", pet = "stray")))
