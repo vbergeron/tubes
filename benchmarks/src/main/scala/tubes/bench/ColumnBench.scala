@@ -7,17 +7,19 @@ import tubes.*
 /** `price > 1000 && x * y * z > 50.0` over diamond rows, written with `Column` constructors. */
 inline def bigAndPricey: Column[Boolean] =
     Column.And(
-        Column.Compare(CmpOp.Gt, Column.Ref[Int, "price"]("price", 6), Column.Lit(1000), Ordering.Int),
+        Column.Compare(CmpOp.Gt, Column.Ref[Int, "price"]("price", 6), Column.Lit(1000), Ordering.Int, Lift.Plain()),
         Column.Compare(
             CmpOp.Gt,
             Column.Arith(
                 ArithOp.Times,
-                Column.Arith(ArithOp.Times, Column.Ref[Double, "x"]("x", 7), Column.Ref[Double, "y"]("y", 8), Numeric.DoubleIsFractional),
+                Column.Arith(ArithOp.Times, Column.Ref[Double, "x"]("x", 7), Column.Ref[Double, "y"]("y", 8), Numeric.DoubleIsFractional, Lift.Plain()),
                 Column.Ref[Double, "z"]("z", 9),
-                Numeric.DoubleIsFractional
+                Numeric.DoubleIsFractional,
+                Lift.Plain()
             ),
             Column.Lit(50.0),
-            Ordering.Double.TotalOrdering
+            Ordering.Double.TotalOrdering,
+            Lift.Plain()
         )
     )
 

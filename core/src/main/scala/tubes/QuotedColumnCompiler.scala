@@ -21,20 +21,19 @@ def QuotedColumnCompiler(shift: Int)(using Quotes): Column.Compiler[Expr] = new 
             '{ (row: Product) => row.productElement($at).asInstanceOf[A] }
         case '{ type n <: String; Column.Alias[A, n]($c, $name) }   => typed(c)
         case '{ Column.Lit[A]($value) }              => '{ (row: Product) => $value }
-        case '{ Column.Arith[A]($op, $l, $r, $num) } =>
-            val (fl, fr) = (typed(l), typed(r))
-            op match
-                case '{ ArithOp.Plus }  => '{ (row: Product) => $num.plus($fl(row), $fr(row)) }
-                case '{ ArithOp.Minus } => '{ (row: Product) => $num.minus($fl(row), $fr(row)) }
-                case '{ ArithOp.Times } => '{ (row: Product) => $num.times($fl(row), $fr(row)) }
-        case '{ Column.Compare[t]($op, $l, $r, $ord) } =>
-            val (fl, fr) = (typed(l), typed(r))
-            val f = op match
-                case '{ CmpOp.Lt } => '{ (row: Product) => $ord.lt($fl(row), $fr(row)) }
-                case '{ CmpOp.Le } => '{ (row: Product) => $ord.lteq($fl(row), $fr(row)) }
-                case '{ CmpOp.Gt } => '{ (row: Product) => $ord.gt($fl(row), $fr(row)) }
-                case '{ CmpOp.Ge } => '{ (row: Product) => $ord.gteq($fl(row), $fr(row)) }
-            f.asExprOf[Product => A]
+        case '{ Column.Arith[b, l, r, A]($op, $lc, $rc, $num, $lift) } =>
+            lifted[l, r, b, b, A](typed(lc), typed(rc)): (x, y) =>
+                op match
+                    case '{ ArithOp.Plus }  => '{ $num.plus($x, $y) }
+                    case '{ ArithOp.Minus } => '{ $num.minus($x, $y) }
+                    case '{ ArithOp.Times } => '{ $num.times($x, $y) }
+        case '{ Column.Compare[b, l, r, A]($op, $lc, $rc, $ord, $lift) } =>
+            lifted[l, r, b, Boolean, A](typed(lc), typed(rc)): (x, y) =>
+                op match
+                    case '{ CmpOp.Lt } => '{ $ord.lt($x, $y) }
+                    case '{ CmpOp.Le } => '{ $ord.lteq($x, $y) }
+                    case '{ CmpOp.Gt } => '{ $ord.gt($x, $y) }
+                    case '{ CmpOp.Ge } => '{ $ord.gteq($x, $y) }
         case '{ Column.Equal[t]($l, $r) }            =>
             val (fl, fr) = (typed(l), typed(r))
             '{ (row: Product) => $fl(row) == $fr(row) }.asExprOf[Product => A]
@@ -54,6 +53,35 @@ def QuotedColumnCompiler(shift: Int)(using Quotes): Column.Compiler[Expr] = new 
                 case None    => $fv(row)
             }
         case _ => quotes.reflect.report.errorAndAbort(s"Cannot compile column expression ${expr.show}", expr)
+
+    /** Applies `op` to the values read by `fl` and `fr`, which hold `V` values, possibly as `Option[V]`. When either does,
+      * the result `O` is an `Option[B]`, `None` where either value is missing; otherwise it is `B`.
+      */
+    private def lifted[L: Type, R: Type, V: Type, B: Type, O: Type](fl: Expr[Product => L], fr: Expr[Product => R])(
+        op: (Expr[V], Expr[V]) => Expr[B]
+    ): Expr[Product => O] =
+        val (optL, optR) = (isOption[L], isOption[R])
+        /** Reads `f` on `row` as a `V`, unwrapping an `Option[V]` and yielding `None` where it is missing. */
+        def read[T: Type](f: Expr[Product => T], opt: Boolean, row: Expr[Product])(k: Expr[V] => Expr[O]): Expr[O] =
+            val value = Expr.betaReduce('{ $f($row) })
+            if opt then
+                '{
+                    $value.asInstanceOf[Option[V]] match
+                        case Some(v) => ${ k('v) }
+                        case None    => None.asInstanceOf[O]
+                }
+            else k('{ $value.asInstanceOf[V] })
+        '{ (row: Product) =>
+            ${
+                read(fl, optL, 'row): x =>
+                    read(fr, optR, 'row): y =>
+                        if optL || optR then '{ Some(${ op(x, y) }).asInstanceOf[O] } else '{ ${ op(x, y) }.asInstanceOf[O] }
+            }
+        }
+
+    private def isOption[T: Type]: Boolean =
+        import quotes.reflect.*
+        TypeRepr.of[T].dealias.simplified <:< TypeRepr.of[Option[Any]]
 
 /** Drops what inlining and `Selectable` leave around an expression: inlined wrappers, ascriptions and casts. */
 private[tubes] def peel(using Quotes)(term: quotes.reflect.Term): quotes.reflect.Term =
