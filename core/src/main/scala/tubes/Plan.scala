@@ -62,6 +62,13 @@ object Plan:
             val schemas = JoinSchemas(plan.schema, RightSchema[Out, R](right.schema, plan.schema.names.length))
             JoinSpec[J](plan, right, kind, condition(using schemas), compileJoin[Out, R](condition))
 
+        /** Groups rows by the named `keys` columns, a single one or a tuple, then aggregates each group with the
+          * aggregations given next: `.groupBy($.cut)((count.as("n"), $.price.sum.as("total")))`. Output rows hold the
+          * keys followed by the aggregations, one row per group, in order of first appearance.
+          */
+        inline def groupBy[K](inline keys: Schema[Out] ?=> K)(using k: Projection[K]): GroupBy[Out, k.Out] =
+            GroupBy(plan, k.columns(keys(using plan.schema)), compileKey(keys))
+
         /** Applies a reusable step to this plan. */
         def through[B <: AnyNamedTuple](step: Plan[Out] => Plan[B]): Plan[B] = step(plan)
 
@@ -105,6 +112,31 @@ final class SelectSpec[Out <: AnyNamedTuple](
 
     override def toString: String =
         schema.names.zip(columns).map((n, c) => s"$n = $c").mkString(s"SelectSpec($input, ", ", ", ")")
+
+/** A `groupBy` waiting for its aggregations; `key` computes a row's group key from the `keys` columns. */
+final class GroupBy[In <: AnyNamedTuple, K <: AnyNamedTuple](
+    val input: Plan[In],
+    val keys: List[Column[?] & Named[?]],
+    val key: Product => Any
+):
+    /** Aggregates each group with the named `aggregations`, a single one or a tuple. */
+    inline def apply[G](inline aggregations: Schema[In] ?=> G)(using a: Aggregation[G]): Plan[NamedTuple.Concat[K, a.Out]] =
+        GroupBySpec(input, keys, key, a.aggregates(aggregations(using input.schema)), compileAggregates(aggregations))
+
+/** Groups the rows of `input` by `keys` and aggregates each group with `aggregates`; output rows hold the keys
+  * followed by the aggregated values. `key` computes a row's group key, `compiled` folds rows into a group.
+  */
+final class GroupBySpec[Out <: AnyNamedTuple](
+    val input: Plan[?],
+    val keys: List[Column[?] & Named[?]],
+    val key: Product => Any,
+    val aggregates: List[Agg[?] & Named[?]],
+    val compiled: Aggregates
+) extends Plan[Out]:
+    val schema: Schema[Out] = new Schema[Out](IArray.from(keys.map(_.name) ++ aggregates.map(_.name)))
+
+    override def toString: String =
+        s"GroupBySpec($input, ${keys.map(_.name).mkString("[", ", ", "]")}, ${aggregates.mkString(", ")})"
 
 /** The fields of `NT`, each made optional. */
 type Optional[NT <: AnyNamedTuple] = NamedTuple.NamedTuple[Names[NT], Tuple.Map[DropNames[NT], Option]]

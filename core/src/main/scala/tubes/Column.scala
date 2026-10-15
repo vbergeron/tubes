@@ -57,6 +57,13 @@ object Column:
         inline def >=(inline rhs: Column[A]): Column[Boolean] = Compare(CmpOp.Ge, lhs, rhs, ord)
         inline def >=(inline rhs: A): Column[Boolean]         = Compare(CmpOp.Ge, lhs, Lit(rhs), ord)
 
+    /** Aggregations of a column over the rows of a group, for `groupBy`. */
+    extension [A](inline col: Column[A])
+        inline def sum(using num: Numeric[A]): Agg[A]      = Agg.Sum(col, num)
+        inline def avg(using num: Numeric[A]): Agg[Double] = Agg.Avg(col, num)
+        inline def min(using ord: Ordering[A]): Agg[A]     = Agg.Min(col, ord)
+        inline def max(using ord: Ordering[A]): Agg[A]     = Agg.Max(col, ord)
+
     /** Optional columns, such as fields typed `Option[A]`, fall back to `value` where they hold `None`. */
     extension [A](inline lhs: Column[Option[A]])
         inline def default(inline value: Column[A]): Column[A] = Default(lhs, value)

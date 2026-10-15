@@ -1,5 +1,6 @@
 package tubes
 
+import scala.jdk.CollectionConverters.*
 import NamedTuple.AnyNamedTuple
 
 /** Row-based kernel: streams a plan's rows through one iterator pipeline, using the row functions compiled into its
@@ -22,6 +23,7 @@ object RowKernel:
         case f: FilterSpec[?] => rows(f.input).filter(f.compiled)
         case s: SelectSpec[?] => rows(s.input).map(s.compiled)
         case j: JoinSpec[?]   => hashJoin(j)
+        case g: GroupBySpec[?] => group(g)
 
     /** Whether `plan`'s rows are already `Out` tuples; otherwise they are still a source's own values. */
     private def yieldsTuples(plan: Plan[?]): Boolean = plan match
@@ -29,6 +31,39 @@ object RowKernel:
         case f: FilterSpec[?] => yieldsTuples(f.input)
         case _: SelectSpec[?] => true
         case _: JoinSpec[?]   => false
+        case _: GroupBySpec[?] => true
+
+    /** Folds every input row into the accumulators of its group, then emits one row per group: its key fields, then
+      * its aggregated values. Groups come out in order of their first row.
+      */
+    private def group(g: GroupBySpec[?]): Iterator[Product] =
+        val aggs   = g.compiled
+        val groups = java.util.LinkedHashMap[Any, Array[Accumulator]]()
+        val input  = rows(g.input)
+        while input.hasNext do
+            val row  = input.next()
+            val key  = g.key(row)
+            var accs = groups.get(key)
+            if accs == null then
+                accs = Array.fill(aggs.size)(Accumulator())
+                groups.put(key, accs)
+            aggs.update(accs, row)
+        val arity = g.keys.size
+        groups.entrySet.iterator.asScala.map: entry =>
+            val out = new Array[Object](arity + aggs.size)
+            if arity == 1 then out(0) = entry.getKey.asInstanceOf[Object]
+            else
+                val key = entry.getKey.asInstanceOf[Product]
+                var i   = 0
+                while i < arity do
+                    out(i) = key.productElement(i).asInstanceOf[Object]
+                    i += 1
+            val results = aggs.results(entry.getValue)
+            var j       = 0
+            while j < results.length do
+                out(arity + j) = results(j).asInstanceOf[Object]
+                j += 1
+            Tuple.fromArray(out)
 
     /** Builds a hash table over the right rows, then streams the left rows through it, in order. Outer joins then add
       * the right rows that matched nothing.
