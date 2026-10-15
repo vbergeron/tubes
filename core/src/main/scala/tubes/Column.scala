@@ -35,6 +35,7 @@ enum Column[A]:
     case Or(lhs: Column[Boolean], rhs: Column[Boolean]) extends Column[Boolean]
     case Not(col: Column[Boolean]) extends Column[Boolean]
     case Default[A](col: Column[Option[A]], value: Column[A]) extends Column[A]
+    case IsNone[A](col: Column[Option[A]]) extends Column[Boolean]
 
 object Column:
     /** The columns of a schema with field names `N` and field types `T`. */
@@ -159,6 +160,9 @@ object Column:
     extension [A](inline lhs: Column[Option[A]])
         inline def default(inline value: Column[A]): Column[A] = Default(lhs, value)
         inline def default(inline value: A): Column[A]         = Default(lhs, Lit(value))
+
+        /** Whether this column holds `None`, as SQL's `IS NULL`. */
+        inline def isNone: Column[Boolean] = IsNone(lhs)
 
     extension (inline lhs: Column[Boolean])
         inline def &&(inline rhs: Column[Boolean]): Column[Boolean] = And(lhs, rhs)

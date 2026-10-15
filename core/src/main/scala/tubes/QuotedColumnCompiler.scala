@@ -52,6 +52,9 @@ def QuotedColumnCompiler(shift: Int)(using Quotes): Column.Compiler[Expr] = new 
                 case Some(a) => a
                 case None    => $fv(row)
             }
+        case '{ Column.IsNone[t]($c) }               =>
+            val f = typed(c)
+            '{ (row: Product) => $f(row).isEmpty }.asExprOf[Product => A]
         case _ => quotes.reflect.report.errorAndAbort(s"Cannot compile column expression ${expr.show}", expr)
 
     /** Applies `op` to the values read by `fl` and `fr`, which hold `V` values, possibly as `Option[V]`. When either does,

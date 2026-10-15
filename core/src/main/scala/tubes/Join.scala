@@ -139,4 +139,5 @@ private def refIndices(using Quotes)(col: Expr[Column[?]]): Option[List[Int]] =
         case '{ Column.Or($l, $r) }                                 => both(l, r)
         case '{ Column.Not($c) }                                    => refIndices(c)
         case '{ Column.Default[a]($c, $value) }                     => both(c, value)
+        case '{ Column.IsNone[a]($c) }                              => refIndices(c)
         case _                                                      => None
