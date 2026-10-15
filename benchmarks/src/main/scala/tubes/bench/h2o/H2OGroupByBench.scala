@@ -2,6 +2,7 @@ package tubes.bench.h2o
 
 import java.util.concurrent.TimeUnit
 import scala.jdk.CollectionConverters.*
+import scala.reflect.ClassTag
 import org.openjdk.jmh.annotations.*
 import tubes.*
 
@@ -13,7 +14,7 @@ type Q5  = (id6: Int, v1: Int, v2: Int, v3: Double)
 type Q10 = (id1: String, id2: String, id3: String, id4: Int, id5: Int, id6: Int, v3: Double, count: Long)
 
 /** The group-by questions of the H2O.ai db-benchmark (https://h2oai.github.io/db-benchmark/), over `n` generated rows.
-  * Each supported question runs on the row kernel and as a hand-written loop folding groups into a `LinkedHashMap`;
+  * Each supported question runs on the row kernel and as a hand-written loop folding groups into a `LinkedHashMap`, both collecting into an `IArray`;
   * setup checks both give the same rows.
   *
   * Questions tubes cannot express yet are kept as placeholders at the end, with the syntax they would use.
@@ -54,9 +55,9 @@ class H2OGroupByBench:
         check("q5", handWrittenQ5(), rowKernelQ5())
         check("q10", handWrittenQ10(), rowKernelQ10())
 
-    private def check(name: String, expected: List[?], actual: List[?]): Unit =
+    private def check[R](name: String, expected: IArray[R], actual: IArray[R]): Unit =
         require(expected.nonEmpty, s"$name: no rows")
-        require(expected == actual, s"$name: kernel disagrees on ${expected.size} groups")
+        require(expected.sameElements(actual), s"$name: kernel disagrees on ${expected.size} groups")
 
     /** Folds every row into the accumulator of its group, created by `init`; groups keep their first-seen order. */
     private inline def fold[K, A](inline key: GroupRow => K, inline init: GroupRow => A)(inline add: (A, GroupRow) => Unit)
@@ -72,6 +73,8 @@ class H2OGroupByBench:
             else add(acc, r)
         groups
 
+    extension [A: ClassTag](groups: Iterator[A]) private def toIArray: IArray[A] = IArray.unsafeFromArray(groups.toArray)
+
     private final class IntSum(var v: Int)
     private final class SumMean(var v1: Int, var v3: Double, var n: Long)
     private final class Means(var v1: Long, var v2: Long, var v3: Double, var n: Long)
@@ -80,35 +83,35 @@ class H2OGroupByBench:
 
     // q1: sum v1 by id1 (100 groups)
 
-    @Benchmark def rowKernelQ1(): List[Q1] = q1.materialize(RowKernel())
+    @Benchmark def rowKernelQ1(): IArray[Q1] = q1.materialize(RowKernel(IArray))
 
-    @Benchmark def handWrittenQ1(): List[Q1] =
-        fold(_.id1, _ => IntSum(0))((a, r) => a.v += r.v1).asScala.iterator.map((k, a) => (id1 = k, v1 = a.v)).toList
+    @Benchmark def handWrittenQ1(): IArray[Q1] =
+        fold(_.id1, _ => IntSum(0))((a, r) => a.v += r.v1).asScala.iterator.map((k, a) => (id1 = k, v1 = a.v)).toIArray
 
     // q2: sum v1 by id1, id2 (10k groups)
 
-    @Benchmark def rowKernelQ2(): List[Q2] = q2.materialize(RowKernel())
+    @Benchmark def rowKernelQ2(): IArray[Q2] = q2.materialize(RowKernel(IArray))
 
-    @Benchmark def handWrittenQ2(): List[Q2] =
+    @Benchmark def handWrittenQ2(): IArray[Q2] =
         fold(r => (r.id1, r.id2), _ => IntSum(0))((a, r) => a.v += r.v1)
-            .asScala.iterator.map((k, a) => (id1 = k._1, id2 = k._2, v1 = a.v)).toList
+            .asScala.iterator.map((k, a) => (id1 = k._1, id2 = k._2, v1 = a.v)).toIArray
 
     // q3: sum v1, mean v3 by id3 (n / 100 groups)
 
-    @Benchmark def rowKernelQ3(): List[Q3] = q3.materialize(RowKernel())
+    @Benchmark def rowKernelQ3(): IArray[Q3] = q3.materialize(RowKernel(IArray))
 
-    @Benchmark def handWrittenQ3(): List[Q3] =
+    @Benchmark def handWrittenQ3(): IArray[Q3] =
         fold(_.id3, _ => SumMean(0, 0, 0)): (a, r) =>
             a.v1 += r.v1
             a.v3 += r.v3
             a.n += 1
-        .asScala.iterator.map((k, a) => (id3 = k, v1 = a.v1, v3 = a.v3 / a.n)).toList
+        .asScala.iterator.map((k, a) => (id3 = k, v1 = a.v1, v3 = a.v3 / a.n)).toIArray
 
     // q4: mean v1, v2, v3 by id4 (100 groups)
 
-    @Benchmark def rowKernelQ4(): List[Q4] = q4.materialize(RowKernel())
+    @Benchmark def rowKernelQ4(): IArray[Q4] = q4.materialize(RowKernel(IArray))
 
-    @Benchmark def handWrittenQ4(): List[Q4] =
+    @Benchmark def handWrittenQ4(): IArray[Q4] =
         fold(_.id4, _ => Means(0, 0, 0, 0)): (a, r) =>
             a.v1 += r.v1
             a.v2 += r.v2
@@ -116,30 +119,30 @@ class H2OGroupByBench:
             a.n += 1
         .asScala.iterator
             .map((k, a) => (id4 = k, v1 = a.v1.toDouble / a.n, v2 = a.v2.toDouble / a.n, v3 = a.v3 / a.n))
-            .toList
+            .toIArray
 
     // q5: sum v1, v2, v3 by id6 (n / 100 groups)
 
-    @Benchmark def rowKernelQ5(): List[Q5] = q5.materialize(RowKernel())
+    @Benchmark def rowKernelQ5(): IArray[Q5] = q5.materialize(RowKernel(IArray))
 
-    @Benchmark def handWrittenQ5(): List[Q5] =
+    @Benchmark def handWrittenQ5(): IArray[Q5] =
         fold(_.id6, _ => Sums(0, 0, 0)): (a, r) =>
             a.v1 += r.v1
             a.v2 += r.v2
             a.v3 += r.v3
-        .asScala.iterator.map((k, a) => (id6 = k, v1 = a.v1, v2 = a.v2, v3 = a.v3)).toList
+        .asScala.iterator.map((k, a) => (id6 = k, v1 = a.v1, v2 = a.v2, v3 = a.v3)).toIArray
 
     // q10: sum v3, count by id1..id6 (almost one group per row)
 
-    @Benchmark def rowKernelQ10(): List[Q10] = q10.materialize(RowKernel())
+    @Benchmark def rowKernelQ10(): IArray[Q10] = q10.materialize(RowKernel(IArray))
 
-    @Benchmark def handWrittenQ10(): List[Q10] =
+    @Benchmark def handWrittenQ10(): IArray[Q10] =
         fold(r => (r.id1, r.id2, r.id3, r.id4, r.id5, r.id6), _ => SumCount(0, 0)): (a, r) =>
             a.v3 += r.v3
             a.n += 1
         .asScala.iterator
             .map((k, a) => (id1 = k._1, id2 = k._2, id3 = k._3, id4 = k._4, id5 = k._5, id6 = k._6, v3 = a.v3, count = a.n))
-            .toList
+            .toIArray
 
     // Placeholders: questions tubes cannot express yet, with the syntax they would use.
     //

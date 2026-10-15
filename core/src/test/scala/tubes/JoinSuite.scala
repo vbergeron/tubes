@@ -19,7 +19,7 @@ class JoinSuite extends munit.FunSuite:
     test("joins on one key, keeping left order and every match"):
         val plan = from(items).join(from(stocks))($left.sku === $right.skuRef).select(($.size, $.store))
         assertEquals(
-            plan.materialize(RowKernel()),
+            plan.materialize(RowKernel(List)),
             for size <- List(10, 12); store <- List("north", "south", "north") yield (size = size, store = store)
         )
 
@@ -28,7 +28,7 @@ class JoinSuite extends munit.FunSuite:
             .join(from(stocks))(($right.colorRef === $left.color) && ($left.sku === $right.skuRef) && ($right.qty > $left.size - 10))
             .select(($.size, $.store, $.qty))
         assertEquals(
-            plan.materialize(RowKernel()),
+            plan.materialize(RowKernel(List)),
             List((size = 10, store = "north", qty = 3), (size = 12, store = "north", qty = 5))
         )
 
@@ -46,15 +46,15 @@ class JoinSuite extends munit.FunSuite:
         assert(keys.matches(items(2), stocks.last))
         assert(!keys.matches(items.head, stocks.head))
         assert(keys.residual.isDefined)
-        assertEquals(plan.select(($.size, $.store)).materialize(RowKernel()), List((size = 8, store = "north")))
+        assertEquals(plan.select(($.size, $.store)).materialize(RowKernel(List)), List((size = 8, store = "north")))
 
     test("joins without equalities pair every row, then filter"):
         val plan = from(items).join(from(stores))($left.size > 9).select(($.sku, $.city))
-        assertEquals(plan.materialize(RowKernel()).size, 4)
+        assertEquals(plan.materialize(RowKernel(List)).size, 4)
 
     test("materializes joined rows as flat tuples"):
         val plan = from(stores).join(from(stocks))($left.storeName === $right.store && $right.qty === 7)
-        assertEquals(plan.materialize(RowKernel()), List(("north", "Lyon", "north", 3, "red", 7)))
+        assertEquals(plan.materialize(RowKernel(List)), List(("north", "Lyon", "north", 3, "red", 7)))
         assertEquals(plan.schema.names.toList, List("storeName", "city", "store", "skuRef", "colorRef", "qty"))
 
     test("joins chain, and `$` sees the joined schema"):
@@ -64,7 +64,7 @@ class JoinSuite extends munit.FunSuite:
             .filter($.qty > 0)
             .select(($.color, $.city, ($.qty * 2).as("double")))
         assertEquals(
-            plan.materialize(RowKernel()),
+            plan.materialize(RowKernel(List)),
             List((color = "red", city = "Lyon", double = 6), (color = "blue", city = "Lyon", double = 10))
         )
 

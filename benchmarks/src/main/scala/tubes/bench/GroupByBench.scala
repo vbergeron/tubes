@@ -63,7 +63,7 @@ class GroupByBench:
         groups.asScala.iterator.map((cut, a) => (cut = cut, n = a.n, total = a.total, avgCarat = a.carats / a.n)).toList
 
     @Benchmark
-    def rowKernelByCut(): List[CutStats] = byCut.materialize(RowKernel())
+    def rowKernelByCut(): List[CutStats] = byCut.materialize(RowKernel(List))
 
     private final class GradeAcc(var low: Int, var high: Int, var n: Long)
 
@@ -83,7 +83,7 @@ class GroupByBench:
             .toList
 
     @Benchmark
-    def rowKernelByGrade(): List[GradeRange] = byGrade.materialize(RowKernel())
+    def rowKernelByGrade(): List[GradeRange] = byGrade.materialize(RowKernel(List))
 
     private final class ColorAcc(var prices: Double, var n: Long, var widest: Double)
 
@@ -100,4 +100,4 @@ class GroupByBench:
         groups.asScala.iterator.map((color, a) => (color = color, avgPrice = a.prices / a.n, widest = a.widest)).toList
 
     @Benchmark
-    def rowKernelLargeByColor(): List[ColorStats] = largeByColor.materialize(RowKernel())
+    def rowKernelLargeByColor(): List[ColorStats] = largeByColor.materialize(RowKernel(List))

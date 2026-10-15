@@ -83,7 +83,7 @@ class JoinBench:
 
     @Benchmark
     def rowKernelSmallBuild(): List[CutResult] =
-        smallBuild.materialize(RowKernel())
+        smallBuild.materialize(RowKernel(List))
 
     @Benchmark
     def handWrittenCompositeKey(): List[GradeResult] =
@@ -96,7 +96,7 @@ class JoinBench:
 
     @Benchmark
     def rowKernelCompositeKey(): List[GradeResult] =
-        compositeKey.materialize(RowKernel())
+        compositeKey.materialize(RowKernel(List))
 
     @Benchmark
     def handWrittenLargeBuild(): List[RankResult] =
@@ -107,4 +107,4 @@ class JoinBench:
 
     @Benchmark
     def rowKernelLargeBuild(): List[RankResult] =
-        largeBuild.materialize(RowKernel())
+        largeBuild.materialize(RowKernel(List))

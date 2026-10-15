@@ -14,7 +14,7 @@ class OuterJoinSuite extends munit.FunSuite:
     test("left joins keep unmatched left rows, with `None` right fields"):
         val plan = from(items).leftJoin(from(stocks))($left.sku === $right.skuRef).select(($.sku, $.store))
         assertEquals(
-            plan.materialize(RowKernel()),
+            plan.materialize(RowKernel(List)),
             List(
                 (sku = 1, store = Some("north")),
                 (sku = 1, store = Some("south")),
@@ -26,7 +26,7 @@ class OuterJoinSuite extends munit.FunSuite:
     test("right joins keep unmatched right rows last, with `None` left fields"):
         val plan = from(items).rightJoin(from(stocks))($left.sku === $right.skuRef).select(($.color, $.skuRef))
         assertEquals(
-            plan.materialize(RowKernel()),
+            plan.materialize(RowKernel(List)),
             List(
                 (color = Some("red"), skuRef = 1),
                 (color = Some("red"), skuRef = 1),
@@ -38,7 +38,7 @@ class OuterJoinSuite extends munit.FunSuite:
     test("full joins keep unmatched rows of both sides"):
         val plan = from(items).fullJoin(from(stocks))($left.sku === $right.skuRef).select(($.sku, $.skuRef))
         assertEquals(
-            plan.materialize(RowKernel()),
+            plan.materialize(RowKernel(List)),
             List(
                 (sku = Some(1), skuRef = Some(1)),
                 (sku = Some(1), skuRef = Some(1)),
@@ -54,7 +54,7 @@ class OuterJoinSuite extends munit.FunSuite:
             .fullJoin(from(stocks))($left.sku === $right.skuRef && $right.qty > 0)
             .select(($.sku, $.store))
         assertEquals(
-            plan.materialize(RowKernel()),
+            plan.materialize(RowKernel(List)),
             List(
                 (sku = Some(1), store = Some("north")),
                 (sku = Some(2), store = None),
@@ -68,7 +68,7 @@ class OuterJoinSuite extends munit.FunSuite:
     test("joins without equalities keep the left rows the condition rejects for all right rows"):
         val plan = from(items).leftJoin(from(stores))($left.sku > 2).select(($.sku, $.storeName))
         assertEquals(
-            plan.materialize(RowKernel()),
+            plan.materialize(RowKernel(List)),
             List(
                 (sku = 1, storeName = None),
                 (sku = 2, storeName = None),
@@ -80,16 +80,16 @@ class OuterJoinSuite extends munit.FunSuite:
     test("optional fields of an outer join nest their options"):
         val plan = from(stocks).leftJoin(from(stores))($left.store === $right.storeName).select(($.qty, $.city))
         assertEquals(
-            plan.materialize(RowKernel()).map(_.city),
+            plan.materialize(RowKernel(List)).map(_.city),
             List(Some(Some("Lyon")), None, None, None)
         )
 
     test("outer joins materialize as flat tuples, and their optional columns take defaults"):
         val plan = from(items).leftJoin(from(stocks))($left.sku === $right.skuRef)
-        assertEquals(plan.materialize(RowKernel()).last, (3, "green", None, None, None))
+        assertEquals(plan.materialize(RowKernel(List)).last, (3, "green", None, None, None))
         val totals = plan.filter($.qty.default(0) === 0).select(($.sku, $.store.default("none").as("store")))
         assertEquals(
-            totals.materialize(RowKernel()),
+            totals.materialize(RowKernel(List)),
             List((sku = 1, store = "south"), (sku = 2, store = "none"), (sku = 3, store = "none"))
         )
 
@@ -99,7 +99,7 @@ class OuterJoinSuite extends munit.FunSuite:
             .leftJoin(from(stores))($left.store.default("") === $right.storeName)
             .select(($.sku, $.city))
         assertEquals(
-            plan.materialize(RowKernel()),
+            plan.materialize(RowKernel(List)),
             List(
                 (sku = 1, city = Some(Some("Lyon"))),
                 (sku = 1, city = None),
