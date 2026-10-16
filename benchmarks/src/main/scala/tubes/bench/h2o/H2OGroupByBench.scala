@@ -11,6 +11,7 @@ type Q2  = (id1: String, id2: String, v1: Int)
 type Q3  = (id3: String, v1: Int, v3: Double)
 type Q4  = (id4: Int, v1: Double, v2: Double, v3: Double)
 type Q5  = (id6: Int, v1: Int, v2: Int, v3: Double)
+type Q7  = (id3: String, range_v1_v2: Int)
 type Q10 = (id1: String, id2: String, id3: String, id4: Int, id5: Int, id6: Int, v3: Double, count: Long)
 
 /** The group-by questions of the H2O.ai db-benchmark (https://h2oai.github.io/db-benchmark/), over `n` generated rows.
@@ -37,6 +38,7 @@ class H2OGroupByBench:
     var q3: Plan[Q3]   = null
     var q4: Plan[Q4]   = null
     var q5: Plan[Q5]   = null
+    var q7: Plan[Q7]   = null
     var q10: Plan[Q10] = null
 
     @Setup
@@ -47,12 +49,14 @@ class H2OGroupByBench:
         q3 = from(rows).groupBy($.id3)(($.v1.sum.as("v1"), $.v3.avg.as("v3")))
         q4 = from(rows).groupBy($.id4)(($.v1.avg.as("v1"), $.v2.avg.as("v2"), $.v3.avg.as("v3")))
         q5 = from(rows).groupBy($.id6)(($.v1.sum.as("v1"), $.v2.sum.as("v2"), $.v3.sum.as("v3")))
+        q7 = from(rows).groupBy($.id3)(($.v1.max - $.v2.min).as("range_v1_v2"))
         q10 = from(rows).groupBy(($.id1, $.id2, $.id3, $.id4, $.id5, $.id6))(($.v3.sum.as("v3"), count.as("count")))
         check("q1", handWrittenQ1(), rowKernelQ1())
         check("q2", handWrittenQ2(), rowKernelQ2())
         check("q3", handWrittenQ3(), rowKernelQ3())
         check("q4", handWrittenQ4(), rowKernelQ4())
         check("q5", handWrittenQ5(), rowKernelQ5())
+        check("q7", handWrittenQ7(), rowKernelQ7())
         check("q10", handWrittenQ10(), rowKernelQ10())
 
     private def check[R](name: String, expected: IArray[R], actual: IArray[R]): Unit =
@@ -80,6 +84,7 @@ class H2OGroupByBench:
     private final class Means(var v1: Long, var v2: Long, var v3: Double, var n: Long)
     private final class Sums(var v1: Int, var v2: Int, var v3: Double)
     private final class SumCount(var v3: Double, var n: Long)
+    private final class MaxMin(var v1: Int, var v2: Int)
 
     // q1: sum v1 by id1 (100 groups)
 
@@ -132,6 +137,16 @@ class H2OGroupByBench:
             a.v3 += r.v3
         .asScala.iterator.map((k, a) => (id6 = k, v1 = a.v1, v2 = a.v2, v3 = a.v3)).toIArray
 
+    // q7: max v1 - min v2 by id3 (n / 100 groups)
+
+    @Benchmark def rowKernelQ7(): IArray[Q7] = q7.materialize(RowKernel(IArray))
+
+    @Benchmark def handWrittenQ7(): IArray[Q7] =
+        fold(_.id3, r => MaxMin(r.v1, r.v2)): (a, r) =>
+            if r.v1 > a.v1 then a.v1 = r.v1
+            if r.v2 < a.v2 then a.v2 = r.v2
+        .asScala.iterator.map((k, a) => (id3 = k, range_v1_v2 = a.v1 - a.v2)).toIArray
+
     // q10: sum v3, count by id1..id6 (almost one group per row)
 
     @Benchmark def rowKernelQ10(): IArray[Q10] = q10.materialize(RowKernel(IArray))
@@ -149,9 +164,6 @@ class H2OGroupByBench:
     // q6: median v3, sd v3 by id4, id5 (10k groups). Needs `median` and `sd` aggregates, which keep or summarise
     //     every value of a group rather than a constant-size accumulator.
     //       from(rows).groupBy(($.id4, $.id5))(($.v3.median.as("median_v3"), $.v3.sd.as("sd_v3")))
-    //
-    // q7: max v1 - min v2 by id3 (n / 100 groups). Needs arithmetic over aggregates.
-    //       from(rows).groupBy($.id3)(($.v1.max - $.v2.min).as("range_v1_v2"))
     //
     // q8: largest two v3 by id6 (n / 100 groups, two rows each). Needs top-n per group, producing several rows per
     //     group, or ordering plus a per-group take.

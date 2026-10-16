@@ -53,6 +53,20 @@ def QuotedColumnCompiler(shift: Int)(using Quotes): Column.Compiler[Expr] = new 
                 case Some(a) => a
                 case None    => $fv(row)
             }
+        case '{ Column.Div[A]($l, $r, $frac) }      =>
+            val (fl, fr) = (typed(l), typed(r))
+            '{ (row: Product) => $frac.div($fl(row), $fr(row)) }
+        case '{ Column.Quot[A]($l, $r, $int) }      =>
+            val (fl, fr) = (typed(l), typed(r))
+            '{ (row: Product) => $int.quot($fl(row), $fr(row)) }
+        case '{ Column.ToDouble[t]($c, $num) }      =>
+            val f = typed(c)
+            '{ (row: Product) => $num.toDouble($f(row)) }.asExprOf[Product => A]
+        case '{ Column.Aggregate[A]($agg) }         =>
+            quotes.reflect.report.errorAndAbort(
+                "Aggregations such as sum or count only make sense over the rows of a group: use them in the aggregations of a groupBy",
+                expr
+            )
         case _ => quotes.reflect.report.errorAndAbort(s"Cannot compile column expression ${expr.show}", expr)
 
 /** Drops what inlining and `Selectable` leave around an expression: inlined wrappers, ascriptions and casts. */

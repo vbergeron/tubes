@@ -1,5 +1,7 @@
 package tubes
 
+import scala.compiletime.{error, summonFrom, summonInline}
+
 enum ArithOp:
     case Plus, Minus, Times
 
@@ -21,6 +23,12 @@ enum Column[A]:
     case Or(lhs: Column[Boolean], rhs: Column[Boolean]) extends Column[Boolean]
     case Not(col: Column[Boolean]) extends Column[Boolean]
     case Default[A](col: Column[Option[A]], value: Column[A]) extends Column[A]
+    case Div[A](lhs: Column[A], rhs: Column[A], div: Fractional[A]) extends Column[A]
+    case Quot[A](lhs: Column[A], rhs: Column[A], int: Integral[A]) extends Column[A]
+    case ToDouble[A](col: Column[A], num: Numeric[A]) extends Column[Double]
+
+    /** The value of `agg` over the rows of a group. Only `groupBy` computes these, as or within its output columns. */
+    case Aggregate[A](agg: Agg[A]) extends Column[A]
 
 object Column:
     /** The columns of a schema with field names `N` and field types `T`. */
@@ -28,7 +36,7 @@ object Column:
         case (n *: ns, t *: ts)       => (Column[t] & Named[n & String]) *: NamedFields[ns, ts]
         case (EmptyTuple, EmptyTuple) => EmptyTuple
 
-    def lit[A](value: A): Column[A] = Lit(value)
+    inline def lit[A](inline value: A): Column[A] = Lit(value)
 
     extension [A](inline lhs: Column[A])
         inline def ===(inline rhs: Column[A]): Column[Boolean] = Equal(lhs, rhs)
@@ -47,6 +55,20 @@ object Column:
         inline def *(inline rhs: Column[A]): Column[A] = Arith(ArithOp.Times, lhs, rhs, num)
         inline def *(inline rhs: A): Column[A]         = Arith(ArithOp.Times, lhs, Lit(rhs), num)
 
+    /** Division: exact for fractional types such as `Double`, truncating towards zero for integral ones such as `Int`. */
+    extension [A](inline lhs: Column[A])
+        inline def /(inline rhs: Column[A]): Column[A] = divide(lhs, rhs)
+        inline def /(inline rhs: A): Column[A]         = divide(lhs, Lit(rhs))
+
+    /** Picks the division of `A` where it is written, so the instance lands in the tree as is, like the others. */
+    private inline def divide[A](inline lhs: Column[A], inline rhs: Column[A]): Column[A] = summonFrom:
+        case _: Fractional[A] => Div(lhs, rhs, summonInline[Fractional[A]])
+        case _: Integral[A]   => Quot(lhs, rhs, summonInline[Integral[A]])
+        case _                => error("Cannot divide: no Fractional or Integral instance for the column type")
+
+    extension [A](inline col: Column[A])(using num: Numeric[A])
+        inline def toDouble: Column[Double] = ToDouble(col, num)
+
     extension [A](inline lhs: Column[A])(using ord: Ordering[A])
         inline def <(inline rhs: Column[A]): Column[Boolean]  = Compare(CmpOp.Lt, lhs, rhs, ord)
         inline def <(inline rhs: A): Column[Boolean]          = Compare(CmpOp.Lt, lhs, Lit(rhs), ord)
@@ -57,12 +79,14 @@ object Column:
         inline def >=(inline rhs: Column[A]): Column[Boolean] = Compare(CmpOp.Ge, lhs, rhs, ord)
         inline def >=(inline rhs: A): Column[Boolean]         = Compare(CmpOp.Ge, lhs, Lit(rhs), ord)
 
-    /** Aggregations of a column over the rows of a group, for `groupBy`. */
+    /** Aggregations of a column over the rows of a group, for `groupBy`. They are columns themselves, so they combine
+      * with any other column operation: `($.price.sum / $.qty.sum.toDouble).as("unitPrice")`.
+      */
     extension [A](inline col: Column[A])
-        inline def sum(using num: Numeric[A]): Agg[A]      = Agg.Sum(col, num)
-        inline def avg(using num: Numeric[A]): Agg[Double] = Agg.Avg(col, num)
-        inline def min(using ord: Ordering[A]): Agg[A]     = Agg.Min(col, ord)
-        inline def max(using ord: Ordering[A]): Agg[A]     = Agg.Max(col, ord)
+        inline def sum(using num: Numeric[A]): Column[A]      = Aggregate(Agg.Sum(col, num))
+        inline def avg(using num: Numeric[A]): Column[Double] = Aggregate(Agg.Avg(col, num))
+        inline def min(using ord: Ordering[A]): Column[A]     = Aggregate(Agg.Min(col, ord))
+        inline def max(using ord: Ordering[A]): Column[A]     = Aggregate(Agg.Max(col, ord))
 
     /** Optional columns, such as fields typed `Option[A]`, fall back to `value` where they hold `None`. */
     extension [A](inline lhs: Column[Option[A]])

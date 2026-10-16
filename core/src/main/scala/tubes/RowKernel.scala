@@ -58,7 +58,7 @@ object RowKernel:
             val key  = g.key(row)
             var accs = groups.get(key)
             if accs == null then
-                accs = Array.fill(aggs.size)(Accumulator())
+                accs = Array.fill(aggs.slots)(Accumulator())
                 groups.put(key, accs)
             aggs.update(accs, row)
         val arity = g.keys.size
