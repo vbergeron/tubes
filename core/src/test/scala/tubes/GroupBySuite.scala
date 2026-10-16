@@ -51,5 +51,50 @@ class GroupBySuite extends munit.FunSuite:
             .select(($.shop, ($.qty * 10).as("scaled")))
         assertEquals(plan.materialize(RowKernel(List)), List((shop = "north", scaled = 100)))
 
+    test("aggregations combine with the column algebra"):
+        val plan = from(sales).groupBy($.shop)(
+            (($.qty.max - $.qty.min).as("range"), ($.units.sum / 10 + count).as("mixed"), ($.qty.sum > 6).as("big"),
+                ($.qty.sum / 4).as("quarter"))
+        )
+        assertEquals(
+            plan.materialize(RowKernel(List)),
+            List(
+                (shop = "north", range = 3, mixed = 13L, big = true, quarter = 2),
+                (shop = "south", range = 3, mixed = 7L, big = false, quarter = 1)
+            )
+        )
+
+    test("ratios of aggregations, with fractional division and toDouble"):
+        val plan = from(sales).groupBy($.item)(
+            (($.price.sum / count.toDouble).as("meanPrice"), ($.qty.sum.toDouble / $.units.sum.toDouble).as("ratio"),
+                ($.amount.sum / $.amount.max).as("share"))
+        )
+        val List(apple, pear) = plan.materialize(RowKernel(List)): @unchecked
+        assertEquals((apple.item, pear.item), ("apple", "pear"))
+        assertEqualsDouble(apple.meanPrice, 3.75 / 3, 1e-9)
+        assertEqualsDouble(pear.ratio, 0.1, 1e-9)
+        assertEquals(pear.share, BigDecimal("7.00") / BigDecimal("5.00"))
+
+    test("aggregations are computed once however often they are used"):
+        val plan = from(sales).groupBy($.shop)(
+            ($.qty.sum.as("qty"), ($.qty.sum * 2).as("double"), ($.qty.sum + $.qty.max).as("plusMax"), count.as("n"))
+        )
+        assertEquals(plan.asInstanceOf[GroupBySpec[?]].compiled.slots, 3)
+        assertEquals(
+            plan.materialize(RowKernel(List)),
+            List((shop = "north", qty = 10, double = 20, plusMax = 15, n = 3L), (shop = "south", qty = 5, double = 10, plusMax = 9, n = 2L))
+        )
+
+    test("aggregated columns can be literals or aggregations of computed columns"):
+        val plan = from(sales).groupBy($.shop)((Column.lit(1).as("one"), ($.qty.toDouble / 2.0).avg.as("half")))
+        assertEquals(plan.materialize(RowKernel(List)), List((shop = "north", one = 1, half = 5.0 / 3), (shop = "south", one = 1, half = 1.25)))
+
+    test("fields must be aggregated in aggregations"):
+        assert(compileErrors("from(sales).groupBy($.shop)(($.qty + $.qty.sum).as(\"x\"))").contains("Column qty must be aggregated"))
+
+    test("aggregations are only computed by groupBy"):
+        assert(compileErrors("from(sales).filter($.qty.sum > 3)").contains("only make sense over the rows of a group"))
+        assert(compileErrors("from(sales).groupBy($.shop)($.qty.sum.sum.as(\"x\"))").contains("only make sense over the rows of a group"))
+
     test("aggregations must be named"):
         assert(compileErrors("from(sales).groupBy($.shop)($.qty.sum)").contains("every aggregation must be named"))

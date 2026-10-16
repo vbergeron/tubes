@@ -125,18 +125,23 @@ final class GroupBy[In <: AnyNamedTuple, K <: AnyNamedTuple](
     val keys: List[Column[?] & Named[?]],
     val key: Product => Any
 ):
-    /** Aggregates each group with the named `aggregations`, a single one or a tuple. */
-    inline def apply[G](inline aggregations: Schema[In] ?=> G)(using a: Aggregation[G]): Plan[NamedTuple.Concat[K, a.Out]] =
-        GroupBySpec(input, keys, key, a.aggregates(aggregations(using input.schema)), compileAggregates(aggregations))
+    /** Aggregates each group into the named `aggregations` columns, a single one or a tuple. Each is an aggregation
+      * such as `$.price.sum`, or any column computed from aggregations: `($.price.max - $.price.min).as("spread")`.
+      */
+    inline def apply[G](inline aggregations: Schema[In] ?=> G)(
+        using @implicitNotFound("Cannot aggregate ${G}: every aggregation must be named, with .as(\"name\")")
+        a: Projection[G]
+    ): Plan[NamedTuple.Concat[K, a.Out]] =
+        GroupBySpec(input, keys, key, a.columns(aggregations(using input.schema)), compileAggregates(aggregations))
 
-/** Groups the rows of `input` by `keys` and aggregates each group with `aggregates`; output rows hold the keys
-  * followed by the aggregated values. `key` computes a row's group key, `compiled` folds rows into a group.
+/** Groups the rows of `input` by `keys` and aggregates each group into the `aggregates` columns, computed from
+  * aggregations over the group's rows; output rows hold the keys followed by the aggregated values. `key` computes a row's group key, `compiled` folds rows into a group.
   */
 final class GroupBySpec[Out <: AnyNamedTuple](
     val input: Plan[?],
     val keys: List[Column[?] & Named[?]],
     val key: Product => Any,
-    val aggregates: List[Agg[?] & Named[?]],
+    val aggregates: List[Column[?] & Named[?]],
     val compiled: Aggregates
 ) extends Plan[Out]:
     val schema: Schema[Out] = new Schema[Out](IArray.from(keys.map(_.name) ++ aggregates.map(_.name)))

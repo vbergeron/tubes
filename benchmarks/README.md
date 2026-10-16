@@ -56,8 +56,10 @@ All times are in seconds.
 | q5 sum v1:v3 by id6 | **1.65** | 0.44 | 0.124 | 0.089 | 0.072 | 0.114 | 0.74 |
 | q10 sum v3, count by id1:id6 | **6.2** | 6.0 | 0.30 | 0.63 | 0.37 | 0.93 | 4.3 |
 
-Questions q6 to q9 need features tubes does not have yet: median and standard deviation, arithmetic over aggregates,
-top-n per group, and correlation. `H2OGroupByBench` keeps them as placeholders, with the syntax they would use.
+q7 (max v1 - min v2 by id3) runs in `H2OGroupByBench` now that aggregations combine with column arithmetic; it has
+not been measured against the other engines yet. Questions q6, q8 and q9 need features tubes does not have yet: median
+and standard deviation, top-n per group, and correlation. `H2OGroupByBench` keeps them as placeholders, with the syntax
+they would use.
 
 ### Joins
 

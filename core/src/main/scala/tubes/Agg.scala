@@ -1,47 +1,19 @@
 package tubes
 
-import scala.annotation.implicitNotFound
 import scala.quoted.*
-import NamedTuple.{AnyNamedTuple, NamedTuple}
 
-/** An aggregation over the rows of a group, written in a `groupBy` with `count` or `$.field.sum`-style calls. */
+/** An aggregation over the rows of a group. Aggregations are written as columns, with `count` or `$.field.sum`-style
+  * calls that wrap them in `Column.Aggregate`, so they combine with the rest of the column algebra.
+  */
 enum Agg[A]:
     case Count() extends Agg[Long]
     case Sum[A](col: Column[A], num: Numeric[A]) extends Agg[A]
     case Avg[A](col: Column[A], num: Numeric[A]) extends Agg[Double]
     case Min[A](col: Column[A], ord: Ordering[A]) extends Agg[A]
     case Max[A](col: Column[A], ord: Ordering[A]) extends Agg[A]
-    case Alias[A, N <: String](agg: Agg[A], name: String) extends Agg[A], Named[N]
-
-object Agg:
-    extension [A](inline agg: Agg[A])
-        /** Names this aggregation `name`, both in the AST and in its type. */
-        inline def as[N <: String & Singleton](inline name: N): Agg[A] & Named[N] = Alias[A, N](agg, name)
 
 /** The number of rows in the group. */
-inline def count: Agg[Long] = Agg.Count()
-
-/** How a tuple of named aggregations `G` becomes named output fields typed by `Out`. */
-@implicitNotFound("Cannot aggregate ${G}: every aggregation must be named, with .as(\"name\")")
-trait Aggregation[G]:
-    type Out <: AnyNamedTuple
-    def aggregates(g: G): List[Agg[?] & Named[?]]
-
-object Aggregation:
-    type Aux[G, O <: AnyNamedTuple] = Aggregation[G] { type Out = O }
-
-    private def make[G, O <: AnyNamedTuple](f: G => List[Agg[?] & Named[?]]): Aux[G, O] =
-        new Aggregation[G]:
-            type Out = O
-            def aggregates(g: G) = f(g)
-
-    given single[N <: String, A]: Aux[Agg[A] & Named[N], NamedTuple[N *: EmptyTuple, A *: EmptyTuple]] = make(List(_))
-
-    given empty: Aux[EmptyTuple, NamedTuple[EmptyTuple, EmptyTuple]] = make(_ => Nil)
-
-    given cons[N <: String, A, T <: Tuple, ON <: Tuple, OV <: Tuple](using t: Aux[T, NamedTuple[ON, OV]])
-        : Aux[(Agg[A] & Named[N]) *: T, NamedTuple[N *: ON, A *: OV]] =
-        make(g => g.head :: t.aggregates(g.tail))
+inline def count: Column[Long] = Column.Aggregate(Agg.Count())
 
 /** The running state of one aggregation in one group; each aggregation uses the slots it needs. */
 final class Accumulator:
@@ -50,30 +22,89 @@ final class Accumulator:
     var d: Double = 0
     var r: Any    = null
 
-/** Aggregations compiled for a row kernel: `update` folds a row into a group's accumulators, `results` reads the
-  * aggregated values out of them, in order.
+/** Aggregations compiled for a row kernel: each group keeps `slots` accumulators, `update` folds a row into them, and
+  * `results` computes the group's `size` output values from them, in order.
   */
 final class Aggregates(
+    val slots: Int,
     val size: Int,
     val update: (Array[Accumulator], Product) => Unit,
     val results: Array[Accumulator] => Array[Any]
 )
 
-/** Compiles the aggregations computed by a `groupBy` lambda. Sums, averages, minimums and maximums of `Int`, `Long` and
-  * `Double` with their default instances accumulate in primitive slots; other types go through their instance.
+/** Compiles the output columns of a `groupBy` lambda. Each distinct aggregation they contain gets an accumulator slot;
+  * the columns are then computed from the aggregated values, as if those were the fields of a row. Sums, averages,
+  * minimums and maximums of `Int`, `Long` and `Double` with their default instances accumulate in primitive slots;
+  * other types go through their instance.
   */
 inline def compileAggregates[S, G](inline step: S ?=> G): Aggregates = ${ compileAggregatesImpl('step) }
 
 private def compileAggregatesImpl[S: Type, G: Type](step: Expr[S ?=> G])(using Quotes): Expr[Aggregates] =
     import quotes.reflect.*
-    val codes = tupleElements(stepBody(step).asTerm).zipWithIndex.map((agg, slot) => aggregate(agg, slot))
+    val outputs = tupleElements(stepBody(step).asTerm).map:
+        case '{ $c: Column[t] } => c
+        case other              => report.errorAndAbort(s"Not a column: ${other.show}", other)
+    val aggs = scala.collection.mutable.ArrayBuffer.empty[Expr[Agg[?]]]
+    /** The slot of `agg`, shared by every occurrence of the same aggregation. */
+    def slotOf(agg: Expr[Agg[?]]): Int =
+        val found = aggs.indexWhere(_.matches(agg))
+        if found >= 0 then found else { aggs += agg; aggs.size - 1 }
+    val computed = outputs.map(c => directSlot(c).map(slotOf).toLeft(overAggregates(c, slotOf)))
+    val codes    = aggs.toList.zipWithIndex.map((agg, slot) => aggregate(agg, slot))
+    /** The output values, given the aggregated values; composite columns read them through a row. */
+    def results(values: Expr[Array[Any]])(using Quotes): Expr[Array[Any]] =
+        if computed == List.tabulate(codes.size)(Left(_)) then values
+        else
+            val row = '{ ArrayRow($values) }
+            val out = computed.map:
+                case Left(slot) => '{ $values(${ Expr(slot) }) }
+                case Right(col) =>
+                    val f: Expr[Product => Any] = QuotedColumnCompiler.compile(col.asInstanceOf[Expr[Column[Any]]])
+                    Expr.betaReduce('{ $f($row) })
+            '{ Array[Any](${ Varargs(out) }*) }
     '{
         Aggregates(
             ${ Expr(codes.size) },
+            ${ Expr(outputs.size) },
             (accs: Array[Accumulator], row: Product) => ${ Expr.block(codes.map(_.update('accs, 'row)), '{ () }) },
-            (accs: Array[Accumulator]) => Array[Any](${ Varargs(codes.map(_.result('accs))) }*)
+            (accs: Array[Accumulator]) =>
+                val values = Array[Any](${ Varargs(codes.map(_.result('accs))) }*)
+                ${ results('values) }
         )
     }
+
+/** The aggregation `col` computes as it is, possibly renamed; `None` when it computes more, or something else. */
+private def directSlot(using Quotes)(col: Expr[Column[?]]): Option[Expr[Agg[?]]] =
+    stripColumn(col) match
+        case '{ type n <: String; Column.Alias[a, n]($c, $name) } => directSlot(c)
+        case '{ Column.Aggregate[a]($agg) }                         => Some(agg)
+        case _                                                      => None
+
+/** `col` with each aggregation in it replaced by a reference to its value, in field `slotOf(aggregation)` of the row of
+  * aggregated values. Fields of the input rows cannot be read there, outside of an aggregation.
+  */
+private def overAggregates(using Quotes)(col: Expr[Column[?]], slotOf: Expr[Agg[?]] => Int): Expr[Column[?]] =
+    import quotes.reflect.*
+    val mapper = new TreeMap:
+        override def transformTerm(tree: Term)(owner: Symbol): Term =
+            if !tree.isExpr || !(tree.tpe <:< TypeRepr.of[Column[?]]) then super.transformTerm(tree)(owner)
+            else
+                tree.asExpr match
+                    case '{ Column.Aggregate[a]($agg) } =>
+                        '{ Column.Ref[a, String]("aggregate", ${ Expr(slotOf(agg)) }) }.asTerm
+                    case '{ type n <: String; Column.Ref[a, n]($name, $index) } =>
+                        report.errorAndAbort(
+                            s"Column ${name.valueOrAbort} must be aggregated, with sum, avg, min or max, to be used in a groupBy aggregation",
+                            tree.pos
+                        )
+                    case _ => super.transformTerm(tree)(owner)
+    mapper.transformTerm(col.asTerm)(Symbol.spliceOwner).asExprOf[Column[?]]
+
+/** A row whose fields are `values`, read in place. */
+final class ArrayRow(values: Array[Any]) extends Product:
+    def productArity: Int            = values.length
+    def productElement(n: Int): Any  = values(n)
+    def canEqual(that: Any): Boolean = false
 
 /** How one aggregation updates its accumulator from a row, and reads its result back. */
 private final class AggCode(
@@ -85,7 +116,6 @@ private def aggregate(using Quotes)(agg: Expr[Any], slot: Int): AggCode =
     import quotes.reflect.*
     val code = slotCode(slot)
     peel(agg.asTerm).asExpr match
-        case '{ type n <: String; Agg.Alias[a, n]($inner, $name) } => aggregate(inner, slot)
         case '{ Agg.Count() } =>
             code((a, _) => '{ $a.n += 1 }, a => '{ $a.n })
         case '{ Agg.Sum[t]($col, $num) } =>
