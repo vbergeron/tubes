@@ -119,6 +119,18 @@ class BatchKernelSuite extends munit.FunSuite:
         assertEquals(plan.materialize(BatchKernel(List)), expected.materialize(RowKernel(List)))
         same(plan)
 
+    test("groups and joins on keys spread over a wide range, and on Double keys"):
+        case class Event(user: Long, day: Int, amount: Int, score: Double)
+        case class User(id: Long, name: String)
+        val rnd    = scala.util.Random(3)
+        val events = List.fill(600)(Event(rnd.nextInt(80) * 1000003L, rnd.nextInt(7), rnd.nextInt(100), rnd.nextInt(5) / 2.0))
+        val users  = (0 until 80 by 2).map(i => User(i * 1000003L, s"u$i")).toList
+        same(from(events).groupBy($.user)(($.amount.sum.as("total"), count.as("n"))))
+        same(from(events).groupBy(($.user, $.day))($.amount.max.as("top")))
+        same(from(events).groupBy($.score)($.amount.min.as("least")))
+        same(from(events).leftJoin(from(users))($left.user === $right.id).select(($.amount, $.name)))
+        same(from(users).join(from(events))($left.id === $right.user && $right.day === 3))
+
     test("exposes the batches, column by column"):
         val batches = BatchKernel.batches(from(items).select(($.sku, ($.size * 2).as("double"))), 3).toList
         assertEquals(batches.map(_.size), List(3, 1))

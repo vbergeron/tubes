@@ -1,7 +1,6 @@
 package tubes
 
 import scala.collection.Factory
-import scala.collection.mutable.ArrayBuffer
 import scala.reflect.ClassTag
 import NamedTuple.AnyNamedTuple
 
@@ -145,38 +144,26 @@ object BatchKernel:
         val aggs = g.aggregates.flatMap(Eval.aggregations).distinct
         // Aggregated values are read back as columns of the result batch, named after their slot.
         val slots      = aggs.zipWithIndex.map((agg, i) => (agg: Agg[?]) -> s"#agg$i").toMap[Agg[?], String]
-        val accs       = aggs.map(BatchAccumulator(_))
-        val ids        = java.util.HashMap[Any, Integer]()
-        val keyColumns = IndexedSeq.fill(g.keys.size)(ArrayBuffer.empty[AnyRef])
-        var groups     = 0
+        val accs = aggs.map(BatchAccumulator(_))
+        // Group ids are key ids: groups are numbered in order of their first row.
+        var groups: KeyMap = null
         for batch <- input do
             val keys = g.keys.map(Eval(_, batch)).toIndexedSeq
-            val gids = new Array[Int](batch.size)
-            var i    = 0
-            while i < batch.size do
-                val key = Vectors.key(keys, i)
-                var id  = ids.get(key)
-                if id == null then
-                    id = groups
-                    ids.put(key, id)
-                    var k = 0
-                    while k < keys.length do
-                        keyColumns(k) += Vectors.get(keys(k), i).asInstanceOf[AnyRef]
-                        k += 1
-                    groups += 1
-                gids(i) = id
-                i += 1
-            accs.foreach(_.update(gids, batch, groups))
+            if groups == null then groups = KeyMap(keys)
+            val gids = groups.insert(keys, batch.size)
+            accs.foreach(_.update(gids, batch, groups.size))
+        if groups == null then groups = KeyMap(g.keys.map(_ => Array.empty[AnyRef]).toIndexedSeq)
+        val count = groups.size
         val result = ColumnBatch(
-            groups,
-            g.keys.zip(keyColumns).map((k, values) => k.name -> Vectors.specialize(values.toArray)).toMap ++
-                aggs.zip(accs).map((agg, acc) => slots(agg) -> acc.result(groups))
+            count,
+            g.keys.zip(groups.keyColumns).map((k, values) => k.name -> values).toMap ++
+                aggs.zip(accs).map((agg, acc) => slots(agg) -> acc.result(count))
         )
         val out = ColumnBatch(
-            groups,
+            count,
             g.keys.map(k => k.name -> result(k.name)).toMap ++ g.aggregates.map(c => c.name -> Eval(c, result, slots))
         )
-        Iterator.range(0, groups, batchSize).map(from => out.slice(from, math.min(from + batchSize, groups)))
+        Iterator.range(0, count, batchSize).map(from => out.slice(from, math.min(from + batchSize, count)))
 
 /** Evaluates column trees over whole batches. */
 private object Eval:
@@ -436,22 +423,23 @@ private final class HashJoin(j: JoinSpec[?], left: Iterator[ColumnBatch], rightI
             case c => Right(c)
         (parts.collect { case Left(k) => k }.toIndexedSeq, parts.collect { case Right(c) => c }.reduceOption(Column.And(_, _)))
 
-    // Built on the first read: the right rows, and per key the chain of their row numbers, in input order.
+    // Built on the first read: the right rows, the ids of their keys, and per key id the chain of its rows, in input
+    // order: `first(id)` is its first row, `rowNext(row)` the next one, `-1` ends a chain.
     private lazy val right: ColumnBatch = Vectors.concat(rightInput.toList, rightNames)
-    private lazy val table: (java.util.HashMap[Any, Array[Int]], Array[Int]) =
+    private lazy val (map, first, rowNext) =
         val rightKeys = keys.map((_, r) => Eval(r, right))
-        val heads     = java.util.HashMap[Any, Array[Int]]() // key -> (first, last)
+        val map       = KeyMap(rightKeys)
+        val ids       = map.insert(rightKeys, right.size)
+        val first     = Vectors.build(map.size)(_ => -1)
+        val last      = new Array[Int](map.size)
         val next      = Vectors.build(right.size)(_ => -1)
-        var i         = 0
-        while i < right.size do
-            val key   = Vectors.key(rightKeys, i)
-            val chain = heads.get(key)
-            if chain == null then heads.put(key, Array(i, i))
-            else
-                next(chain(1)) = i
-                chain(1) = i
-            i += 1
-        (heads, next)
+        var row       = 0
+        while row < right.size do
+            val id = ids(row)
+            if first(id) < 0 then first(id) = row else next(last(id)) = row
+            last(id) = row
+            row += 1
+        (map, first, next)
     private lazy val matched: Array[Boolean] = if j.kind.keepsRight then new Array(right.size) else null
     private var unmatchedDone                = !j.kind.keepsRight
 
@@ -467,16 +455,16 @@ private final class HashJoin(j: JoinSpec[?], left: Iterator[ColumnBatch], rightI
 
     private def probe(batch: ColumnBatch): ColumnBatch =
         val leftKeys = keys.map((l, _) => Eval(l, batch))
+        val ids      = map.find(leftKeys, batch.size)
         val (li, ri) = (Vectors.IntBuffer(), Vectors.IntBuffer())
         var i        = 0
         while i < batch.size do
-            val chain = table(0).get(Vectors.key(leftKeys, i))
-            if chain != null then
-                var r = chain(0)
+            if ids(i) >= 0 then
+                var r = first(ids(i))
                 while r >= 0 do
                     li += i
                     ri += r
-                    r = table(1)(r)
+                    r = rowNext(r)
             i += 1
         val candidates = ColumnBatch(li.size, batch.gather(li.array, li.size).columns ++ right.gather(ri.array, ri.size).columns)
         val pass       = residual.map(c => Vectors.booleans(Eval(c, candidates)))
@@ -611,18 +599,29 @@ private object Vectors:
                     size,
                     names.map: name =>
                         val parts = batches.map(_(name))
-                        val values = new Array[AnyRef](size)
-                        var at     = 0
-                        for part <- parts; i <- 0 until part.length do
-                            values(at) = get(part, i).asInstanceOf[AnyRef]
-                            at += 1
-                        name -> specialize(values)
+                        // Parts of one array type are copied as they are; others are boxed into one array.
+                        if parts.nonEmpty && parts.forall(_.getClass == parts.head.getClass) then
+                            val values = java.lang.reflect.Array.newInstance(parts.head.getClass.getComponentType, size)
+                            var at     = 0
+                            for part <- parts do
+                                System.arraycopy(part, 0, values, at, part.length)
+                                at += part.length
+                            name -> values.asInstanceOf[Array[?]]
+                        else
+                            val values = new Array[AnyRef](size)
+                            var at     = 0
+                            for part <- parts; i <- 0 until part.length do
+                                values(at) = get(part, i).asInstanceOf[AnyRef]
+                                at += 1
+                            name -> specialize(values)
                     .toMap
                 )
 
-    /** The hash key of row `i` across the `keys` columns: the value itself for one column, a list of values otherwise. */
-    def key(keys: IndexedSeq[Array[?]], i: Int): Any =
-        if keys.length == 1 then get(keys(0), i) else List.tabulate(keys.length)(k => get(keys(k), i))
+    /** `a` as `Long`s: its `Int`s widened, or its boxed integers unboxed. */
+    def longs(a: Array[?]): Array[Long] = (a: Any) match
+        case a: Array[Long] => a
+        case a: Array[Int]  => build(a.length)(a(_).toLong)
+        case _              => build(a.length)(get(a, _).asInstanceOf[Number].longValue)
 
     /** `a`, grown so that index `size - 1` exists. */
     def grow[T: ClassTag](a: Array[T], size: Int): Array[T] =
