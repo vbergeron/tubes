@@ -6,29 +6,32 @@ import scala.reflect.ClassTag
 import NamedTuple.AnyNamedTuple
 
 /** Row-based kernel: streams a plan's rows through one iterator pipeline, using the row functions compiled into its
-  * nodes, and collects the result with `factory`.
+  * nodes, and hands them to `collect`, which may hold off running the plan until its rows are read.
   */
-final class RowKernel[Out <: AnyNamedTuple, C] private (factory: Factory[Out, C]) extends Plan.Compiler[Out]:
+final class RowKernel[Out <: AnyNamedTuple, C] private (collect: (=> Iterator[Out]) => C) extends Plan.Compiler[Out]:
     type A = C
 
     def compile(plan: Plan[Out]): C =
-        factory.fromSpecific(RowKernel.rows(plan, asTuples = true).asInstanceOf[Iterator[Out]])
+        collect(RowKernel.rows(plan, asTuples = true).asInstanceOf[Iterator[Out]])
 
 object RowKernel:
     /** Collects the rows with a standard collection companion such as `List`, `Vector` or `Set`, or any `Factory`. */
-    def apply[Out <: AnyNamedTuple, C](factory: Factory[Out, C]): RowKernel[Out, C] = new RowKernel(factory)
+    def apply[Out <: AnyNamedTuple, C](factory: Factory[Out, C]): RowKernel[Out, C] =
+        new RowKernel(rows => factory.fromSpecific(rows))
 
     /** Collects the rows into an `Array`. */
     def apply[Out <: AnyNamedTuple: ClassTag](factory: Array.type): RowKernel[Out, Array[Out]] =
-        new RowKernel(Array.toFactory[Out](factory))
+        new RowKernel(rows => rows.toArray)
 
     /** Collects the rows into an `IArray`. */
     def apply[Out <: AnyNamedTuple: ClassTag](factory: IArray.type): RowKernel[Out, IArray[Out]] =
-        new RowKernel(
-            new Factory[Out, IArray[Out]]:
-                def fromSpecific(it: IterableOnce[Out]): IArray[Out] = IArray.from(it)
-                def newBuilder = Array.newBuilder[Out].mapResult(IArray.unsafeFromArray)
-        )
+        new RowKernel(rows => IArray.from(rows))
+
+    /** Streams the rows into a `LazyList`. The plan starts running when its first row is read, and computes rows as
+      * they are read, except for what a `groupBy` or a join needs up front: all the rows it groups, or its right rows.
+      */
+    def apply[Out <: AnyNamedTuple](factory: LazyList.type): RowKernel[Out, LazyList[Out]] =
+        new RowKernel(rows => LazyList.empty.lazyAppendedAll(rows))
 
     /** Rows produced by `plan`. Inside the plan rows keep whatever representation is cheapest, such as a source's own
       * values or joined rows read in place; `asTuples` asks for `Out` tuples instead, which the node producing them

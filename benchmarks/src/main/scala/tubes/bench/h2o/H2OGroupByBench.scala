@@ -4,6 +4,7 @@ import java.util.concurrent.TimeUnit
 import scala.jdk.CollectionConverters.*
 import scala.reflect.ClassTag
 import org.openjdk.jmh.annotations.*
+import org.openjdk.jmh.infra.Blackhole
 import tubes.*
 
 type Q1  = (id1: String, v1: Int)
@@ -15,8 +16,9 @@ type Q7  = (id3: String, range_v1_v2: Int)
 type Q10 = (id1: String, id2: String, id3: String, id4: Int, id5: Int, id6: Int, v3: Double, count: Long)
 
 /** The group-by questions of the H2O.ai db-benchmark (https://h2oai.github.io/db-benchmark/), over `n` generated rows.
-  * Each supported question runs on the row kernel and as a hand-written loop folding groups into a `LinkedHashMap`, both collecting into an `IArray`;
-  * setup checks both give the same rows.
+  * Each supported question runs on the row kernel and as a hand-written loop folding groups into a `LinkedHashMap`, both
+  * collecting into an `IArray`, then both streaming into a `LazyList` drained row by row (the `Lazy` benchmarks);
+  * setup checks they all give the same rows.
   *
   * Questions tubes cannot express yet are kept as placeholders at the end, with the syntax they would use.
   */
@@ -51,17 +53,18 @@ class H2OGroupByBench:
         q5 = from(rows).groupBy($.id6)(($.v1.sum.as("v1"), $.v2.sum.as("v2"), $.v3.sum.as("v3")))
         q7 = from(rows).groupBy($.id3)(($.v1.max - $.v2.min).as("range_v1_v2"))
         q10 = from(rows).groupBy(($.id1, $.id2, $.id3, $.id4, $.id5, $.id6))(($.v3.sum.as("v3"), count.as("count")))
-        check("q1", handWrittenQ1(), rowKernelQ1())
-        check("q2", handWrittenQ2(), rowKernelQ2())
-        check("q3", handWrittenQ3(), rowKernelQ3())
-        check("q4", handWrittenQ4(), rowKernelQ4())
-        check("q5", handWrittenQ5(), rowKernelQ5())
-        check("q7", handWrittenQ7(), rowKernelQ7())
-        check("q10", handWrittenQ10(), rowKernelQ10())
+        check("q1", handWrittenQ1(), rowKernelQ1(), q1.materialize(RowKernel(LazyList)), LazyList.from(handQ1))
+        check("q2", handWrittenQ2(), rowKernelQ2(), q2.materialize(RowKernel(LazyList)), LazyList.from(handQ2))
+        check("q3", handWrittenQ3(), rowKernelQ3(), q3.materialize(RowKernel(LazyList)), LazyList.from(handQ3))
+        check("q4", handWrittenQ4(), rowKernelQ4(), q4.materialize(RowKernel(LazyList)), LazyList.from(handQ4))
+        check("q5", handWrittenQ5(), rowKernelQ5(), q5.materialize(RowKernel(LazyList)), LazyList.from(handQ5))
+        check("q7", handWrittenQ7(), rowKernelQ7(), q7.materialize(RowKernel(LazyList)), LazyList.from(handQ7))
+        check("q10", handWrittenQ10(), rowKernelQ10(), q10.materialize(RowKernel(LazyList)), LazyList.from(handQ10))
 
-    private def check[R](name: String, expected: IArray[R], actual: IArray[R]): Unit =
+    private def check[R](name: String, expected: IArray[R], actual: IArray[R], streamed: LazyList[R]*): Unit =
         require(expected.nonEmpty, s"$name: no rows")
         require(expected.sameElements(actual), s"$name: kernel disagrees on ${expected.size} groups")
+        require(streamed.forall(expected.sameElements(_)), s"$name: streamed rows disagree on ${expected.size} groups")
 
     /** Folds every row into the accumulator of its group, created by `init`; groups keep their first-seen order. */
     private inline def fold[K, A](inline key: GroupRow => K, inline init: GroupRow => A)(inline add: (A, GroupRow) => Unit)
@@ -89,34 +92,50 @@ class H2OGroupByBench:
     // q1: sum v1 by id1 (100 groups)
 
     @Benchmark def rowKernelQ1(): IArray[Q1] = q1.materialize(RowKernel(IArray))
+    @Benchmark def handWrittenQ1(): IArray[Q1] = handQ1.toIArray
+    @Benchmark def rowKernelLazyQ1(bh: Blackhole): Int = drain(q1.materialize(RowKernel(LazyList)), bh)
+    @Benchmark def handWrittenLazyQ1(bh: Blackhole): Int = drain(LazyList.from(handQ1), bh)
 
-    @Benchmark def handWrittenQ1(): IArray[Q1] =
-        fold(_.id1, _ => IntSum(0))((a, r) => a.v += r.v1).asScala.iterator.map((k, a) => (id1 = k, v1 = a.v)).toIArray
+    /** The hand-written rows of q1, computed as they are read. */
+    private def handQ1: Iterator[Q1] =
+        fold(_.id1, _ => IntSum(0))((a, r) => a.v += r.v1).asScala.iterator.map((k, a) => (id1 = k, v1 = a.v))
 
     // q2: sum v1 by id1, id2 (10k groups)
 
     @Benchmark def rowKernelQ2(): IArray[Q2] = q2.materialize(RowKernel(IArray))
+    @Benchmark def handWrittenQ2(): IArray[Q2] = handQ2.toIArray
+    @Benchmark def rowKernelLazyQ2(bh: Blackhole): Int = drain(q2.materialize(RowKernel(LazyList)), bh)
+    @Benchmark def handWrittenLazyQ2(bh: Blackhole): Int = drain(LazyList.from(handQ2), bh)
 
-    @Benchmark def handWrittenQ2(): IArray[Q2] =
+    /** The hand-written rows of q2, computed as they are read. */
+    private def handQ2: Iterator[Q2] =
         fold(r => (r.id1, r.id2), _ => IntSum(0))((a, r) => a.v += r.v1)
-            .asScala.iterator.map((k, a) => (id1 = k._1, id2 = k._2, v1 = a.v)).toIArray
+            .asScala.iterator.map((k, a) => (id1 = k._1, id2 = k._2, v1 = a.v))
 
     // q3: sum v1, mean v3 by id3 (n / 100 groups)
 
     @Benchmark def rowKernelQ3(): IArray[Q3] = q3.materialize(RowKernel(IArray))
+    @Benchmark def handWrittenQ3(): IArray[Q3] = handQ3.toIArray
+    @Benchmark def rowKernelLazyQ3(bh: Blackhole): Int = drain(q3.materialize(RowKernel(LazyList)), bh)
+    @Benchmark def handWrittenLazyQ3(bh: Blackhole): Int = drain(LazyList.from(handQ3), bh)
 
-    @Benchmark def handWrittenQ3(): IArray[Q3] =
+    /** The hand-written rows of q3, computed as they are read. */
+    private def handQ3: Iterator[Q3] =
         fold(_.id3, _ => SumMean(0, 0, 0)): (a, r) =>
             a.v1 += r.v1
             a.v3 += r.v3
             a.n += 1
-        .asScala.iterator.map((k, a) => (id3 = k, v1 = a.v1, v3 = a.v3 / a.n)).toIArray
+        .asScala.iterator.map((k, a) => (id3 = k, v1 = a.v1, v3 = a.v3 / a.n))
 
     // q4: mean v1, v2, v3 by id4 (100 groups)
 
     @Benchmark def rowKernelQ4(): IArray[Q4] = q4.materialize(RowKernel(IArray))
+    @Benchmark def handWrittenQ4(): IArray[Q4] = handQ4.toIArray
+    @Benchmark def rowKernelLazyQ4(bh: Blackhole): Int = drain(q4.materialize(RowKernel(LazyList)), bh)
+    @Benchmark def handWrittenLazyQ4(bh: Blackhole): Int = drain(LazyList.from(handQ4), bh)
 
-    @Benchmark def handWrittenQ4(): IArray[Q4] =
+    /** The hand-written rows of q4, computed as they are read. */
+    private def handQ4: Iterator[Q4] =
         fold(_.id4, _ => Means(0, 0, 0, 0)): (a, r) =>
             a.v1 += r.v1
             a.v2 += r.v2
@@ -124,40 +143,50 @@ class H2OGroupByBench:
             a.n += 1
         .asScala.iterator
             .map((k, a) => (id4 = k, v1 = a.v1.toDouble / a.n, v2 = a.v2.toDouble / a.n, v3 = a.v3 / a.n))
-            .toIArray
 
     // q5: sum v1, v2, v3 by id6 (n / 100 groups)
 
     @Benchmark def rowKernelQ5(): IArray[Q5] = q5.materialize(RowKernel(IArray))
+    @Benchmark def handWrittenQ5(): IArray[Q5] = handQ5.toIArray
+    @Benchmark def rowKernelLazyQ5(bh: Blackhole): Int = drain(q5.materialize(RowKernel(LazyList)), bh)
+    @Benchmark def handWrittenLazyQ5(bh: Blackhole): Int = drain(LazyList.from(handQ5), bh)
 
-    @Benchmark def handWrittenQ5(): IArray[Q5] =
+    /** The hand-written rows of q5, computed as they are read. */
+    private def handQ5: Iterator[Q5] =
         fold(_.id6, _ => Sums(0, 0, 0)): (a, r) =>
             a.v1 += r.v1
             a.v2 += r.v2
             a.v3 += r.v3
-        .asScala.iterator.map((k, a) => (id6 = k, v1 = a.v1, v2 = a.v2, v3 = a.v3)).toIArray
+        .asScala.iterator.map((k, a) => (id6 = k, v1 = a.v1, v2 = a.v2, v3 = a.v3))
 
     // q7: max v1 - min v2 by id3 (n / 100 groups)
 
     @Benchmark def rowKernelQ7(): IArray[Q7] = q7.materialize(RowKernel(IArray))
+    @Benchmark def handWrittenQ7(): IArray[Q7] = handQ7.toIArray
+    @Benchmark def rowKernelLazyQ7(bh: Blackhole): Int = drain(q7.materialize(RowKernel(LazyList)), bh)
+    @Benchmark def handWrittenLazyQ7(bh: Blackhole): Int = drain(LazyList.from(handQ7), bh)
 
-    @Benchmark def handWrittenQ7(): IArray[Q7] =
+    /** The hand-written rows of q7, computed as they are read. */
+    private def handQ7: Iterator[Q7] =
         fold(_.id3, r => MaxMin(r.v1, r.v2)): (a, r) =>
             if r.v1 > a.v1 then a.v1 = r.v1
             if r.v2 < a.v2 then a.v2 = r.v2
-        .asScala.iterator.map((k, a) => (id3 = k, range_v1_v2 = a.v1 - a.v2)).toIArray
+        .asScala.iterator.map((k, a) => (id3 = k, range_v1_v2 = a.v1 - a.v2))
 
     // q10: sum v3, count by id1..id6 (almost one group per row)
 
     @Benchmark def rowKernelQ10(): IArray[Q10] = q10.materialize(RowKernel(IArray))
+    @Benchmark def handWrittenQ10(): IArray[Q10] = handQ10.toIArray
+    @Benchmark def rowKernelLazyQ10(bh: Blackhole): Int = drain(q10.materialize(RowKernel(LazyList)), bh)
+    @Benchmark def handWrittenLazyQ10(bh: Blackhole): Int = drain(LazyList.from(handQ10), bh)
 
-    @Benchmark def handWrittenQ10(): IArray[Q10] =
+    /** The hand-written rows of q10, computed as they are read. */
+    private def handQ10: Iterator[Q10] =
         fold(r => (r.id1, r.id2, r.id3, r.id4, r.id5, r.id6), _ => SumCount(0, 0)): (a, r) =>
             a.v3 += r.v3
             a.n += 1
         .asScala.iterator
             .map((k, a) => (id1 = k._1, id2 = k._2, id3 = k._3, id4 = k._4, id5 = k._5, id6 = k._6, v3 = a.v3, count = a.n))
-            .toIArray
 
     // Placeholders: questions tubes cannot express yet, with the syntax they would use.
     //

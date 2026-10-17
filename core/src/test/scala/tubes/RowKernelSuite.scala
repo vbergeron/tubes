@@ -27,4 +27,20 @@ class RowKernelSuite extends munit.FunSuite:
         val pairs = from(items).join(from(List(Label("a", "alpha"))))($left.kind === $right.code)
         assertEquals(pairs.materialize(RowKernel(Vector)).map(_.label), Vector("alpha", "alpha"))
 
+    test("streams into a lazy list, running the plan only as far as rows are read"):
+        var reads   = 0
+        val source  = LazyList.from(Iterator.from(1).take(100).map(i => { reads += 1; Item(i, if i % 2 == 0 then "a" else "b") }))
+        val streamed = from(source).filter($.kind === "a").select(($.id, $.kind)).take(10).materialize(RowKernel(LazyList))
+        assertEquals(reads, 0)
+        assertEquals(streamed.head, (id = 2, kind = "a"))
+        assertEquals(reads, 2)
+        assertEquals(streamed.map(_.id).toList, List(2, 4, 6, 8, 10, 12, 14, 16, 18, 20))
+        assertEquals(reads, 20)
+
+    test("streams grouped and joined rows into a lazy list"):
+        val counts = from(items).groupBy($.kind)(count.as("n")).materialize(RowKernel(LazyList))
+        assertEquals(counts.toList, List((kind = "a", n = 2L), (kind = "b", n = 1L)))
+        val pairs = from(items).leftJoin(from(List(Label("a", "alpha"))))($left.kind === $right.code)
+        assertEquals(pairs.materialize(RowKernel(LazyList)).map(_.label).toList, List(Some("alpha"), None, Some("alpha")))
+
     case class Label(code: String, label: String)

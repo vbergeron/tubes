@@ -1,6 +1,19 @@
 package tubes.bench.h2o
 
 import java.util.SplittableRandom
+import org.openjdk.jmh.infra.Blackhole
+
+/** Reads `rows` one by one into `bh` and counts them. The list is passed by name and only `rest` points into it, so the
+  * rows already read can be collected while the rest are computed.
+  */
+def drain[A](rows: => LazyList[A], bh: Blackhole): Int =
+    var rest = rows
+    var n    = 0
+    while rest.nonEmpty do
+        bh.consume(rest.head)
+        rest = rest.tail
+        n += 1
+    n
 
 /** A row of the H2O.ai db-benchmark group-by table. `id1`, `id2` and `id4`, `id5` have 100 distinct values (large
   * groups), `id3` and `id6` have `n / 100` (small groups); `v1` is in 1..5, `v2` in 1..15, `v3` in [0, 100).
