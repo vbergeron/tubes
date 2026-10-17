@@ -46,13 +46,7 @@ class H2OJoinBench:
 
     @Setup
     def setup(params: BenchmarkParams): Unit =
-        data = H2OData.Joins(n)
-        val x = from(data.x)
-        q1 = x.join(from(data.small))($left.id1 === $right.sId1)
-        q2 = x.join(from(data.medium))($left.id2 === $right.mId2)
-        q3 = x.leftJoin(from(data.medium))($left.id2 === $right.mId2)
-        q4 = x.join(from(data.medium))($left.id5 === $right.mId5)
-        q5 = x.join(from(data.big))($left.id3 === $right.bId3)
+        prepare()
         // Only the question being measured, so that each fork does not run every query of the suite.
         params.getBenchmark.split('Q').last match
             case "1" => check("q1", handWrittenQ1(), rowKernelQ1(), q1.materialize(RowKernel(Iterator)), handWrittenStreamRowsQ1)
@@ -60,6 +54,16 @@ class H2OJoinBench:
             case "3" => check("q3", handWrittenQ3(), rowKernelQ3(), q3.materialize(RowKernel(Iterator)), handWrittenStreamRowsQ3)
             case "4" => check("q4", handWrittenQ4(), rowKernelQ4(), q4.materialize(RowKernel(Iterator)), handWrittenStreamRowsQ4)
             case "5" => check("q5", handWrittenQ5(), rowKernelQ5(), q5.materialize(RowKernel(Iterator)), handWrittenStreamRowsQ5)
+
+    /** Generates the tables for `n` and builds the plans of every question, without running them. */
+    def prepare(): Unit =
+        data = H2OData.Joins(n)
+        val x = from(data.x)
+        q1 = x.join(from(data.small))($left.id1 === $right.sId1)
+        q2 = x.join(from(data.medium))($left.id2 === $right.mId2)
+        q3 = x.leftJoin(from(data.medium))($left.id2 === $right.mId2)
+        q4 = x.join(from(data.medium))($left.id5 === $right.mId5)
+        q5 = x.join(from(data.big))($left.id3 === $right.bId3)
 
     private def check[R](name: String, expected: IArray[R], actual: IArray[R], streamed: Iterator[R]*): Unit =
         require(expected.nonEmpty, s"$name: no rows")

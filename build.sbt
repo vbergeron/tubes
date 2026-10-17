@@ -28,5 +28,8 @@ lazy val benchmarks = (project in file("benchmarks"))
   .enablePlugins(JmhPlugin)
   .settings(
     name           := "tubes-benchmarks",
-    publish / skip := true
+    publish / skip := true,
+    // Quick checks (`runMain`) run in their own JVM, with a heap large enough for the H2O tables.
+    run / fork        := true,
+    run / javaOptions ++= Seq("-Xmx10g", "-Xms10g")
   )
