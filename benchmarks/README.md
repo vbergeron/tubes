@@ -29,8 +29,13 @@ the hand-written version return the same rows.
 sbt "benchmarks/Jmh/run"
 
 # the H2O suites at db-benchmark's smallest size (1e7 rows), with a heap large enough to hold it
-sbt "benchmarks/Jmh/run -p n=10000000 -f 1 -wi 2 -i 3 -jvmArgs -Xmx10g -jvmArgs -Xms10g -prof gc tubes.bench.h2o"
+sbt "benchmarks/Jmh/run -p n=10000000 -f 1 -wi 2 -i 3 -jvmArgs -Xmx10g -jvmArgs -Xms10g -jvmArgs -XX:+AlwaysPreTouch -prof gc tubes.bench.h2o"
 ```
+
+`-XX:+AlwaysPreTouch` makes the JVM touch the whole heap when it starts. Without it, a 10 GB heap that is rarely
+collected keeps handing out memory pages never touched before, and in a virtual machine the first touch of each page
+costs a page fault: on a cloud container, that made group-by q4 run 8 to 14 times slower, and slower with every
+iteration, with the time showing up in whatever code first writes to new arrays.
 
 After renaming a benchmark or changing its return type, run `sbt benchmarks/clean`: otherwise JMH can run its stale
 generated code and fail with `NoSuchMethodError`.
@@ -115,45 +120,50 @@ which is small next to the rows themselves.
 columnar engines do. The row kernel and the hand-written code still read case class values and collect rows into an
 `IArray`. On joins, which return about as many rows as they read, that output format is part of the gap.
 
+Group and join keys are numbered by key maps: direct addressing for an `Int` or `Long` key spanning a narrow range
+(`DenseKeyMap`), open addressing over primitives for other `Int` or `Long` keys (`LongKeyMap`), and open addressing over
+any keys and columns otherwise (`OpenKeyMap`).
+
 ### Setup
 
-A 4-core cloud container, Temurin JDK 21, `-Xmx10g -Xms10g`, a single thread; JMH ran 1 fork, 2 warmup and 3 measured
-iterations. This machine is about 2 to 3.5 times slower than the one above: the row kernel takes 0.34 s on group-by q1
-and 16.4 s on join q5 here, against 0.19 s and 8.7 s there. The other engines' times are the db-benchmark ones quoted
-above, on 16 vCPUs.
+A 4-core cloud container, OpenJDK 21, `-Xmx10g -Xms10g -XX:+AlwaysPreTouch`, a single thread; JMH ran 1 fork, 2 warmup
+and 3 measured iterations. With its heap pre-touched, this container runs the row kernel about as fast as the machine
+above: 0.18 s on group-by q1 and 0.21 s on q4 here, against 0.19 s and 0.20 s there, though up to 1.5 times slower on
+q10 and join q5. The other engines' times are the db-benchmark ones quoted above, on 16 vCPUs.
 
-Times are the best of the 3 iterations, in seconds, as the other engines' are the best of their runs. Iterations agree
-within 30% on most benchmarks, but joins vary up to 3 times between iterations, with GC.
+Times are the best of the 3 iterations, in seconds, as the other engines' are the best of their runs. Group-by
+iterations agree within 15%; join iterations vary up to 4 times, with GC.
 
 ### Group-by
 
 | Question | **batch** | row | hand-written | duckdb | polars | datafusion | data.table | spark |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| q1 sum v1 by id1 | **0.12** | 0.34 | 0.25 | 0.005 | 0.041 | 0.019 | 0.081 | 0.61 |
-| q2 sum v1 by id1:id2 | **2.1** | 1.2 | 0.88 | 0.037 | 0.084 | 0.042 | 0.079 | 0.77 |
-| q3 sum v1, mean v3 by id3 | **2.1** | 5.3 | 4.2 | 0.127 | 0.081 | 0.112 | 0.107 | 1.13 |
-| q4 mean v1:v3 by id4 | **0.47** | 0.37 | 0.30 | 0.011 | 0.017 | 0.019 | 0.181 | 0.51 |
-| q5 sum v1:v3 by id6 | **1.2** | 3.1 | 2.2 | 0.124 | 0.089 | 0.072 | 0.114 | 0.74 |
-| q7 max v1 - min v2 by id3 | **2.4** | 4.7 | 2.1 | | | | | |
-| q10 sum v3, count by id1:id6 | **19** | 18 | 14 | 0.30 | 0.63 | 0.37 | 0.93 | 4.3 |
+| q1 sum v1 by id1 | **0.15** | 0.18 | 0.16 | 0.005 | 0.041 | 0.019 | 0.081 | 0.61 |
+| q2 sum v1 by id1:id2 | **0.78** | 0.56 | 0.47 | 0.037 | 0.084 | 0.042 | 0.079 | 0.77 |
+| q3 sum v1, mean v3 by id3 | **0.59** | 0.86 | 0.65 | 0.127 | 0.081 | 0.112 | 0.107 | 1.13 |
+| q4 mean v1:v3 by id4 | **0.11** | 0.21 | 0.18 | 0.011 | 0.017 | 0.019 | 0.181 | 0.51 |
+| q5 sum v1:v3 by id6 | **0.18** | 0.76 | 0.48 | 0.124 | 0.089 | 0.072 | 0.114 | 0.74 |
+| q7 max v1 - min v2 by id3 | **0.71** | 0.89 | 0.50 | | | | | |
+| q10 sum v3, count by id1:id6 | **4.3** | 9.0 | 7.9 | 0.30 | 0.63 | 0.37 | 0.93 | 4.3 |
 
 ### Joins
 
 | Question | **batch** | row | hand-written | duckdb | polars | datafusion | data.table | spark |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| q1 small inner on int | **1.2** | 3.5 | 2.1 | 0.14 | 0.075 | 0.091 | 0.17 | 2.7 |
-| q2 medium inner on int | **1.3** | 5.3 | 3.1 | 0.16 | 0.078 | 0.12 | 0.22 | 3.2 |
-| q3 medium outer on int | **2.9** | 6.5 | 4.3 | 0.20 | 0.078 | 0.14 | 0.40 | 3.5 |
-| q4 medium inner on string | **2.7** | 6.3 | 3.4 | 0.17 | 0.079 | 0.18 | 0.22 | 3.2 |
-| q5 big inner on int | **12** | 16 | 14 | 0.44 | 0.43 | 0.51 | 1.4 | 7.2 |
+| q1 small inner on int | **0.31** | 1.7 | 1.2 | 0.14 | 0.075 | 0.091 | 0.17 | 2.7 |
+| q2 medium inner on int | **0.36** | 2.6 | 1.5 | 0.16 | 0.078 | 0.12 | 0.22 | 3.2 |
+| q3 medium outer on int | **1.7** | 3.4 | 2.1 | 0.20 | 0.078 | 0.14 | 0.40 | 3.5 |
+| q4 medium inner on string | **1.1** | 2.9 | 1.9 | 0.17 | 0.079 | 0.18 | 0.22 | 3.2 |
+| q5 big inner on int | **3.0** | 13 | 6.2 | 0.44 | 0.43 | 0.51 | 1.4 | 7.2 |
 
 ### Reading the numbers
 
-- **Against the row kernel,** the batch kernel is 2 to 3 times faster on the group-bys with one key and many groups
-  (q1, q3, q5, q7), and 1.3 to 4 times faster on joins. Aggregations run in loops over primitive arrays, where the row
-  kernel reads every value through `productElement`.
-- **It is slower with several keys** (q2, q10), and slightly slower on q4: group and join keys are still boxed per row,
-  as one value or a `List` of values. With a single `Int` key and 100 groups (q4), that boxing is most of the work.
-- **Against the columnar engines,** it is still 6 to 60 times behind DuckDB, Polars and DataFusion, on a machine 2 to 3.5
-  times slower and with one thread against 16. Single threaded, it is ahead of Spark's 16 vCPUs on group-by q1 and on
-  joins q1 to q4.
+- **Against the row kernel,** the batch kernel is faster on every question but q2: 2 to 4 times on the group-bys with
+  an `Int` key (q4, q5) or six keys (q10), and 2 to 7 times on joins. Aggregations run in loops over primitive arrays,
+  and keys are numbered by key maps of flat arrays, where the row kernel reads every value through `productElement`
+  and keeps its groups and join keys in `java.util` hash maps.
+- **It is slower on q2,** grouping by two `String` columns, and level with the hand-written loop on q1, with one:
+  `OpenKeyMap` still boxes each key value it compares, and hashes `String`s through `##`.
+- **Against the columnar engines,** single threaded, it is level with Spark's 16 vCPUs on q2 and q10 and faster on every
+  other question, and faster than data.table on group-by q4. It is 1.5 to 2.5 times behind DuckDB, Polars and
+  DataFusion on group-by q5, and 4 to 30 times behind them elsewhere.
