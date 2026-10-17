@@ -6,33 +6,34 @@ import scala.reflect.ClassTag
 import NamedTuple.AnyNamedTuple
 
 /** Row-based kernel: streams a plan's rows through one iterator pipeline, using the row functions compiled into its
-  * nodes, and hands them to `collect`, which may hold off running the plan until its rows are read.
+  * nodes, and collects the result with `factory`.
   */
-final class RowKernel[Out <: AnyNamedTuple, C] private (collect: (=> Iterator[Out]) => C) extends Plan.Compiler[Out]:
+final class RowKernel[Out <: AnyNamedTuple, C] private (factory: Factory[Out, C]) extends Plan.Compiler[Out]:
     type A = C
 
     def compile(plan: Plan[Out]): C =
-        collect(RowKernel.rows(plan, asTuples = true).asInstanceOf[Iterator[Out]])
+        factory.fromSpecific(RowKernel.rows(plan, asTuples = true).asInstanceOf[Iterator[Out]])
 
 object RowKernel:
-    /** Collects the rows with a standard collection companion such as `List`, `Vector` or `Set`, or any `Factory`. */
-    def apply[Out <: AnyNamedTuple, C](factory: Factory[Out, C]): RowKernel[Out, C] =
-        new RowKernel(rows => factory.fromSpecific(rows))
+    /** Collects the rows with a standard collection companion such as `List`, `Vector` or `Set`, or any `Factory`.
+      *
+      * `Iterator` streams them instead: rows are computed as they are read and none is kept once returned. Only what a
+      * `groupBy` or a join needs up front is computed when the plan is materialized: all the rows it groups, or its right
+      * rows.
+      */
+    def apply[Out <: AnyNamedTuple, C](factory: Factory[Out, C]): RowKernel[Out, C] = new RowKernel(factory)
 
     /** Collects the rows into an `Array`. */
     def apply[Out <: AnyNamedTuple: ClassTag](factory: Array.type): RowKernel[Out, Array[Out]] =
-        new RowKernel(rows => rows.toArray)
+        new RowKernel(Array.toFactory[Out](factory))
 
     /** Collects the rows into an `IArray`. */
     def apply[Out <: AnyNamedTuple: ClassTag](factory: IArray.type): RowKernel[Out, IArray[Out]] =
-        new RowKernel(rows => IArray.from(rows))
-
-    /** Streams the rows through an `Iterator`, which can be read once and keeps no row it has returned. The plan starts
-      * running when its first row is asked for, and computes rows as they are read, except for what a `groupBy` or a
-      * join needs up front: all the rows it groups, or its right rows.
-      */
-    def apply[Out <: AnyNamedTuple](factory: Iterator.type): RowKernel[Out, Iterator[Out]] =
-        new RowKernel(rows => Iterator.empty ++ rows) // `++` takes `rows` by name: the plan runs on the first `hasNext`
+        new RowKernel(
+            new Factory[Out, IArray[Out]]:
+                def fromSpecific(it: IterableOnce[Out]): IArray[Out] = IArray.from(it)
+                def newBuilder = Array.newBuilder[Out].mapResult(IArray.unsafeFromArray)
+        )
 
     /** Rows produced by `plan`. Inside the plan rows keep whatever representation is cheapest, such as a source's own
       * values or joined rows read in place; `asTuples` asks for `Out` tuples instead, which the node producing them

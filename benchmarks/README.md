@@ -29,18 +29,6 @@ sbt "benchmarks/Jmh/run"
 sbt "benchmarks/Jmh/run -p n=10000000 -f 1 -wi 2 -i 3 -jvmArgs -Xmx10g -jvmArgs -Xms10g -prof gc tubes.bench.h2o"
 ```
 
-### Quick check
-
-`quickJoinQ5` runs H2O join q5 at 1e7 rows outside JMH, in a single JVM, in about three minutes: tubes and hand-written,
-collected into an `IArray` or streamed through an `Iterator`. Each variant runs twice, the first time as warmup, and
-prints its time, allocations and GC time. These are single runs, so read differences under 15% as noise; use JMH for
-numbers to publish.
-
-```sh
-sbt "benchmarks/runMain tubes.bench.h2o.quickJoinQ5"          # n = 1e7, 2 runs
-sbt "benchmarks/runMain tubes.bench.h2o.quickJoinQ5 1000000 3" # n and runs
-```
-
 After renaming a benchmark or changing its return type, run `sbt benchmarks/clean`: otherwise JMH can run its stale
 generated code and fail with `NoSuchMethodError`.
 
@@ -107,23 +95,6 @@ slower on joins q1 to q3 and on group-by q1 and q4, about as at 1e6 rows: every 
 - **Join q5, about 1.7 times slower.** tubes allocates less than the hand-written join and spends half as long in GC
   (0.95 s against 1.9 s), so the cost is in its hash table over 10M right rows. A lookup reads up to four separate
   arrays and then the row, where `java.util.HashMap` follows a single node.
-
-### Streaming the result: join q5
-
-`RowKernel(Iterator)` streams the rows instead of collecting them. Measured with `quickJoinQ5` (second run of each
-variant) on a 4-core cloud container, slower than the machine above, at 1e7 rows, 9.1M output rows:
-
-| Variant | time (s) | allocated (GB) | GC (s) |
-|---|---:|---:|---:|
-| tubes, `IArray` | 16.2 | 2.15 | 0.82 |
-| tubes, `Iterator` | 13.0 | 1.98 | 0.02 |
-| hand-written, `IArray` | 13.0 | 2.61 | 1.32 |
-| hand-written, `Iterator` | 12.8 | 2.81 | 0.28 |
-
-Streaming removes almost all of tubes' GC time: no row outlives the step that reads it, so they die young instead of
-being kept in a 9M-row array. Streamed, tubes runs as fast as the hand-written join, and allocates less. The remaining
-13 seconds go to building the hash table over the 1e7 right rows and probing it, which collecting or streaming does not
-change.
 
 ### Caveats
 
