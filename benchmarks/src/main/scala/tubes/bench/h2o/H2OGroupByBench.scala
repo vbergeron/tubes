@@ -4,7 +4,7 @@ import java.util.concurrent.TimeUnit
 import scala.jdk.CollectionConverters.*
 import scala.reflect.ClassTag
 import org.openjdk.jmh.annotations.*
-import org.openjdk.jmh.infra.Blackhole
+import org.openjdk.jmh.infra.{BenchmarkParams, Blackhole}
 import tubes.*
 
 type Q1  = (id1: String, v1: Int)
@@ -18,7 +18,8 @@ type Q10 = (id1: String, id2: String, id3: String, id4: Int, id5: Int, id6: Int,
 /** The group-by questions of the H2O.ai db-benchmark (https://h2oai.github.io/db-benchmark/), over `n` generated rows.
   * Each supported question runs on the row kernel and as a hand-written loop folding groups into a `LinkedHashMap`, both
   * collecting into an `IArray`, then both streaming through an `Iterator` drained row by row (the `Stream` benchmarks);
-  * setup checks they all give the same rows.
+  * setup checks they all give the same rows for the question
+  * measured.
   *
   * Questions tubes cannot express yet are kept as placeholders at the end, with the syntax they would use.
   */
@@ -44,7 +45,7 @@ class H2OGroupByBench:
     var q10: Plan[Q10] = null
 
     @Setup
-    def setup(): Unit =
+    def setup(params: BenchmarkParams): Unit =
         rows = H2OData.groupBy(n)
         q1 = from(rows).groupBy($.id1)($.v1.sum.as("v1"))
         q2 = from(rows).groupBy(($.id1, $.id2))($.v1.sum.as("v1"))
@@ -53,13 +54,15 @@ class H2OGroupByBench:
         q5 = from(rows).groupBy($.id6)(($.v1.sum.as("v1"), $.v2.sum.as("v2"), $.v3.sum.as("v3")))
         q7 = from(rows).groupBy($.id3)(($.v1.max - $.v2.min).as("range_v1_v2"))
         q10 = from(rows).groupBy(($.id1, $.id2, $.id3, $.id4, $.id5, $.id6))(($.v3.sum.as("v3"), count.as("count")))
-        check("q1", handWrittenQ1(), rowKernelQ1(), q1.materialize(RowKernel(Iterator)), handQ1)
-        check("q2", handWrittenQ2(), rowKernelQ2(), q2.materialize(RowKernel(Iterator)), handQ2)
-        check("q3", handWrittenQ3(), rowKernelQ3(), q3.materialize(RowKernel(Iterator)), handQ3)
-        check("q4", handWrittenQ4(), rowKernelQ4(), q4.materialize(RowKernel(Iterator)), handQ4)
-        check("q5", handWrittenQ5(), rowKernelQ5(), q5.materialize(RowKernel(Iterator)), handQ5)
-        check("q7", handWrittenQ7(), rowKernelQ7(), q7.materialize(RowKernel(Iterator)), handQ7)
-        check("q10", handWrittenQ10(), rowKernelQ10(), q10.materialize(RowKernel(Iterator)), handQ10)
+        // Only the question being measured, so that each fork does not run every query of the suite.
+        params.getBenchmark.split('Q').last match
+            case "1" => check("q1", handWrittenQ1(), rowKernelQ1(), q1.materialize(RowKernel(Iterator)), handQ1)
+            case "2" => check("q2", handWrittenQ2(), rowKernelQ2(), q2.materialize(RowKernel(Iterator)), handQ2)
+            case "3" => check("q3", handWrittenQ3(), rowKernelQ3(), q3.materialize(RowKernel(Iterator)), handQ3)
+            case "4" => check("q4", handWrittenQ4(), rowKernelQ4(), q4.materialize(RowKernel(Iterator)), handQ4)
+            case "5" => check("q5", handWrittenQ5(), rowKernelQ5(), q5.materialize(RowKernel(Iterator)), handQ5)
+            case "7" => check("q7", handWrittenQ7(), rowKernelQ7(), q7.materialize(RowKernel(Iterator)), handQ7)
+            case "10" => check("q10", handWrittenQ10(), rowKernelQ10(), q10.materialize(RowKernel(Iterator)), handQ10)
 
     private def check[R](name: String, expected: IArray[R], actual: IArray[R], streamed: Iterator[R]*): Unit =
         require(expected.nonEmpty, s"$name: no rows")

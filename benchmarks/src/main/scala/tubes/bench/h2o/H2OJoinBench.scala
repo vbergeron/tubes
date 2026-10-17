@@ -3,7 +3,7 @@ package tubes.bench.h2o
 import java.util.concurrent.TimeUnit
 import scala.reflect.ClassTag
 import org.openjdk.jmh.annotations.*
-import org.openjdk.jmh.infra.Blackhole
+import org.openjdk.jmh.infra.{BenchmarkParams, Blackhole}
 import tubes.*
 import NamedTuple.{Concat, From}
 
@@ -22,7 +22,8 @@ type Q5Join = Concat[XRow, BigRow]
   * right tables of `n / 1e6`, `n / 1e3` and `n` rows. Like db-benchmark, each question returns the full joined table:
   * the left fields followed by the right ones. Each runs on the row kernel and as a hand-written hash join building a
   * `HashMap` over the right table and the same output rows, both collecting into an `IArray`, then both streaming through
-  * an `Iterator` drained row by row (the `Stream` benchmarks); setup checks they all give the same rows.
+  * an `Iterator` drained row by row (the `Stream` benchmarks); setup checks they all give the same rows for the question
+  * measured.
   */
 @State(Scope.Benchmark)
 @BenchmarkMode(Array(Mode.AverageTime))
@@ -44,7 +45,7 @@ class H2OJoinBench:
     var q5: Plan[Q5Join] = null
 
     @Setup
-    def setup(): Unit =
+    def setup(params: BenchmarkParams): Unit =
         data = H2OData.Joins(n)
         val x = from(data.x)
         q1 = x.join(from(data.small))($left.id1 === $right.sId1)
@@ -52,11 +53,13 @@ class H2OJoinBench:
         q3 = x.leftJoin(from(data.medium))($left.id2 === $right.mId2)
         q4 = x.join(from(data.medium))($left.id5 === $right.mId5)
         q5 = x.join(from(data.big))($left.id3 === $right.bId3)
-        check("q1", handWrittenQ1(), rowKernelQ1(), q1.materialize(RowKernel(Iterator)), handWrittenStreamRowsQ1)
-        check("q2", handWrittenQ2(), rowKernelQ2(), q2.materialize(RowKernel(Iterator)), handWrittenStreamRowsQ2)
-        check("q3", handWrittenQ3(), rowKernelQ3(), q3.materialize(RowKernel(Iterator)), handWrittenStreamRowsQ3)
-        check("q4", handWrittenQ4(), rowKernelQ4(), q4.materialize(RowKernel(Iterator)), handWrittenStreamRowsQ4)
-        check("q5", handWrittenQ5(), rowKernelQ5(), q5.materialize(RowKernel(Iterator)), handWrittenStreamRowsQ5)
+        // Only the question being measured, so that each fork does not run every query of the suite.
+        params.getBenchmark.split('Q').last match
+            case "1" => check("q1", handWrittenQ1(), rowKernelQ1(), q1.materialize(RowKernel(Iterator)), handWrittenStreamRowsQ1)
+            case "2" => check("q2", handWrittenQ2(), rowKernelQ2(), q2.materialize(RowKernel(Iterator)), handWrittenStreamRowsQ2)
+            case "3" => check("q3", handWrittenQ3(), rowKernelQ3(), q3.materialize(RowKernel(Iterator)), handWrittenStreamRowsQ3)
+            case "4" => check("q4", handWrittenQ4(), rowKernelQ4(), q4.materialize(RowKernel(Iterator)), handWrittenStreamRowsQ4)
+            case "5" => check("q5", handWrittenQ5(), rowKernelQ5(), q5.materialize(RowKernel(Iterator)), handWrittenStreamRowsQ5)
 
     private def check[R](name: String, expected: IArray[R], actual: IArray[R], streamed: Iterator[R]*): Unit =
         require(expected.nonEmpty, s"$name: no rows")
