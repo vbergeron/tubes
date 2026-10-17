@@ -15,8 +15,8 @@ type Q7  = (id3: String, range_v1_v2: Int)
 type Q10 = (id1: String, id2: String, id3: String, id4: Int, id5: Int, id6: Int, v3: Double, count: Long)
 
 /** The group-by questions of the H2O.ai db-benchmark (https://h2oai.github.io/db-benchmark/), over `n` generated rows.
-  * Each supported question runs on the row kernel and as a hand-written loop folding groups into a `LinkedHashMap`, both collecting into an `IArray`;
-  * setup checks both give the same rows.
+  * Each supported question runs on the row kernel, the batch kernel and as a hand-written loop folding groups into a `LinkedHashMap`, all collecting into an `IArray`;
+  * setup checks they all give the same rows.
   *
   * Questions tubes cannot express yet are kept as placeholders at the end, with the syntax they would use.
   */
@@ -52,12 +52,19 @@ class H2OGroupByBench:
         q7 = from(rows).groupBy($.id3)(($.v1.max - $.v2.min).as("range_v1_v2"))
         q10 = from(rows).groupBy(($.id1, $.id2, $.id3, $.id4, $.id5, $.id6))(($.v3.sum.as("v3"), count.as("count")))
         check("q1", handWrittenQ1(), rowKernelQ1())
+        check("q1 batches", handWrittenQ1(), batchKernelQ1())
         check("q2", handWrittenQ2(), rowKernelQ2())
+        check("q2 batches", handWrittenQ2(), batchKernelQ2())
         check("q3", handWrittenQ3(), rowKernelQ3())
+        check("q3 batches", handWrittenQ3(), batchKernelQ3())
         check("q4", handWrittenQ4(), rowKernelQ4())
+        check("q4 batches", handWrittenQ4(), batchKernelQ4())
         check("q5", handWrittenQ5(), rowKernelQ5())
+        check("q5 batches", handWrittenQ5(), batchKernelQ5())
         check("q7", handWrittenQ7(), rowKernelQ7())
+        check("q7 batches", handWrittenQ7(), batchKernelQ7())
         check("q10", handWrittenQ10(), rowKernelQ10())
+        check("q10 batches", handWrittenQ10(), batchKernelQ10())
 
     private def check[R](name: String, expected: IArray[R], actual: IArray[R]): Unit =
         require(expected.nonEmpty, s"$name: no rows")
@@ -90,12 +97,16 @@ class H2OGroupByBench:
 
     @Benchmark def rowKernelQ1(): IArray[Q1] = q1.materialize(RowKernel(IArray))
 
+    @Benchmark def batchKernelQ1(): IArray[Q1] = q1.materialize(BatchKernel(IArray))
+
     @Benchmark def handWrittenQ1(): IArray[Q1] =
         fold(_.id1, _ => IntSum(0))((a, r) => a.v += r.v1).asScala.iterator.map((k, a) => (id1 = k, v1 = a.v)).toIArray
 
     // q2: sum v1 by id1, id2 (10k groups)
 
     @Benchmark def rowKernelQ2(): IArray[Q2] = q2.materialize(RowKernel(IArray))
+
+    @Benchmark def batchKernelQ2(): IArray[Q2] = q2.materialize(BatchKernel(IArray))
 
     @Benchmark def handWrittenQ2(): IArray[Q2] =
         fold(r => (r.id1, r.id2), _ => IntSum(0))((a, r) => a.v += r.v1)
@@ -104,6 +115,8 @@ class H2OGroupByBench:
     // q3: sum v1, mean v3 by id3 (n / 100 groups)
 
     @Benchmark def rowKernelQ3(): IArray[Q3] = q3.materialize(RowKernel(IArray))
+
+    @Benchmark def batchKernelQ3(): IArray[Q3] = q3.materialize(BatchKernel(IArray))
 
     @Benchmark def handWrittenQ3(): IArray[Q3] =
         fold(_.id3, _ => SumMean(0, 0, 0)): (a, r) =>
@@ -115,6 +128,8 @@ class H2OGroupByBench:
     // q4: mean v1, v2, v3 by id4 (100 groups)
 
     @Benchmark def rowKernelQ4(): IArray[Q4] = q4.materialize(RowKernel(IArray))
+
+    @Benchmark def batchKernelQ4(): IArray[Q4] = q4.materialize(BatchKernel(IArray))
 
     @Benchmark def handWrittenQ4(): IArray[Q4] =
         fold(_.id4, _ => Means(0, 0, 0, 0)): (a, r) =>
@@ -130,6 +145,8 @@ class H2OGroupByBench:
 
     @Benchmark def rowKernelQ5(): IArray[Q5] = q5.materialize(RowKernel(IArray))
 
+    @Benchmark def batchKernelQ5(): IArray[Q5] = q5.materialize(BatchKernel(IArray))
+
     @Benchmark def handWrittenQ5(): IArray[Q5] =
         fold(_.id6, _ => Sums(0, 0, 0)): (a, r) =>
             a.v1 += r.v1
@@ -141,6 +158,8 @@ class H2OGroupByBench:
 
     @Benchmark def rowKernelQ7(): IArray[Q7] = q7.materialize(RowKernel(IArray))
 
+    @Benchmark def batchKernelQ7(): IArray[Q7] = q7.materialize(BatchKernel(IArray))
+
     @Benchmark def handWrittenQ7(): IArray[Q7] =
         fold(_.id3, r => MaxMin(r.v1, r.v2)): (a, r) =>
             if r.v1 > a.v1 then a.v1 = r.v1
@@ -150,6 +169,8 @@ class H2OGroupByBench:
     // q10: sum v3, count by id1..id6 (almost one group per row)
 
     @Benchmark def rowKernelQ10(): IArray[Q10] = q10.materialize(RowKernel(IArray))
+
+    @Benchmark def batchKernelQ10(): IArray[Q10] = q10.materialize(BatchKernel(IArray))
 
     @Benchmark def handWrittenQ10(): IArray[Q10] =
         fold(r => (r.id1, r.id2, r.id3, r.id4, r.id5, r.id6), _ => SumCount(0, 0)): (a, r) =>

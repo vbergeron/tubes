@@ -19,8 +19,8 @@ type Q5Join = Concat[XRow, BigRow]
 
 /** The join questions of the H2O.ai db-benchmark (https://h2oai.github.io/db-benchmark/), joining `n` left rows with
   * right tables of `n / 1e6`, `n / 1e3` and `n` rows. Like db-benchmark, each question returns the full joined table:
-  * the left fields followed by the right ones. Each runs on the row kernel and as a hand-written hash join building a
-  * `HashMap` over the right table and the same output rows, both collecting into an `IArray`; setup checks both give the same rows.
+  * the left fields followed by the right ones. Each runs on the row kernel, the batch kernel and as a hand-written hash join building a
+  * `HashMap` over the right table and the same output rows, all collecting into an `IArray`; setup checks they all give the same rows.
   */
 @State(Scope.Benchmark)
 @BenchmarkMode(Array(Mode.AverageTime))
@@ -51,10 +51,15 @@ class H2OJoinBench:
         q4 = x.join(from(data.medium))($left.id5 === $right.mId5)
         q5 = x.join(from(data.big))($left.id3 === $right.bId3)
         check("q1", handWrittenQ1(), rowKernelQ1())
+        check("q1 batches", handWrittenQ1(), batchKernelQ1())
         check("q2", handWrittenQ2(), rowKernelQ2())
+        check("q2 batches", handWrittenQ2(), batchKernelQ2())
         check("q3", handWrittenQ3(), rowKernelQ3())
+        check("q3 batches", handWrittenQ3(), batchKernelQ3())
         check("q4", handWrittenQ4(), rowKernelQ4())
+        check("q4 batches", handWrittenQ4(), batchKernelQ4())
         check("q5", handWrittenQ5(), rowKernelQ5())
+        check("q5 batches", handWrittenQ5(), batchKernelQ5())
 
     private def check[R](name: String, expected: IArray[R], actual: IArray[R]): Unit =
         require(expected.nonEmpty, s"$name: no rows")
@@ -80,6 +85,8 @@ class H2OJoinBench:
 
     @Benchmark def rowKernelQ1(): IArray[Q1Join] = q1.materialize(RowKernel(IArray))
 
+    @Benchmark def batchKernelQ1(): IArray[Q1Join] = q1.materialize(BatchKernel(IArray))
+
     @Benchmark def handWrittenQ1(): IArray[Q1Join] =
         innerJoin(index(data.small)(_.sId1))(_.id1): (l, r) =>
             (
@@ -91,12 +98,16 @@ class H2OJoinBench:
 
     @Benchmark def rowKernelQ2(): IArray[Q2Join] = q2.materialize(RowKernel(IArray))
 
+    @Benchmark def batchKernelQ2(): IArray[Q2Join] = q2.materialize(BatchKernel(IArray))
+
     @Benchmark def handWrittenQ2(): IArray[Q2Join] =
         innerJoin(index(data.medium)(_.mId2))(_.id2)(mediumRow)
 
     // q3: medium left outer join on an int key
 
     @Benchmark def rowKernelQ3(): IArray[Q3Join] = q3.materialize(RowKernel(IArray))
+
+    @Benchmark def batchKernelQ3(): IArray[Q3Join] = q3.materialize(BatchKernel(IArray))
 
     @Benchmark def handWrittenQ3(): IArray[Q3Join] =
         val table = index(data.medium)(_.mId2)
@@ -114,12 +125,16 @@ class H2OJoinBench:
 
     @Benchmark def rowKernelQ4(): IArray[Q4Join] = q4.materialize(RowKernel(IArray))
 
+    @Benchmark def batchKernelQ4(): IArray[Q4Join] = q4.materialize(BatchKernel(IArray))
+
     @Benchmark def handWrittenQ4(): IArray[Q4Join] =
         innerJoin(index(data.medium)(_.mId5))(_.id5)(mediumRow)
 
     // q5: big inner join on an int key
 
     @Benchmark def rowKernelQ5(): IArray[Q5Join] = q5.materialize(RowKernel(IArray))
+
+    @Benchmark def batchKernelQ5(): IArray[Q5Join] = q5.materialize(BatchKernel(IArray))
 
     @Benchmark def handWrittenQ5(): IArray[Q5Join] =
         innerJoin(index(data.big)(_.bId3))(_.id3): (l, r) =>
