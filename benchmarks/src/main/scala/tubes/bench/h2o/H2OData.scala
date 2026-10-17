@@ -3,15 +3,11 @@ package tubes.bench.h2o
 import java.util.SplittableRandom
 import org.openjdk.jmh.infra.Blackhole
 
-/** Reads `rows` one by one into `bh` and counts them. The list is passed by name and only `rest` points into it, so the
-  * rows already read can be collected while the rest are computed.
-  */
-def drain[A](rows: => LazyList[A], bh: Blackhole): Int =
-    var rest = rows
-    var n    = 0
-    while rest.nonEmpty do
-        bh.consume(rest.head)
-        rest = rest.tail
+/** Reads `rows` one by one into `bh` and counts them; the iterator keeps none of the rows it has returned. */
+def drain[A](rows: Iterator[A], bh: Blackhole): Int =
+    var n = 0
+    while rows.hasNext do
+        bh.consume(rows.next())
         n += 1
     n
 

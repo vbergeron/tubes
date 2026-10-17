@@ -27,11 +27,12 @@ object RowKernel:
     def apply[Out <: AnyNamedTuple: ClassTag](factory: IArray.type): RowKernel[Out, IArray[Out]] =
         new RowKernel(rows => IArray.from(rows))
 
-    /** Streams the rows into a `LazyList`. The plan starts running when its first row is read, and computes rows as
-      * they are read, except for what a `groupBy` or a join needs up front: all the rows it groups, or its right rows.
+    /** Streams the rows through an `Iterator`, which can be read once and keeps no row it has returned. The plan starts
+      * running when its first row is asked for, and computes rows as they are read, except for what a `groupBy` or a
+      * join needs up front: all the rows it groups, or its right rows.
       */
-    def apply[Out <: AnyNamedTuple](factory: LazyList.type): RowKernel[Out, LazyList[Out]] =
-        new RowKernel(rows => LazyList.empty.lazyAppendedAll(rows))
+    def apply[Out <: AnyNamedTuple](factory: Iterator.type): RowKernel[Out, Iterator[Out]] =
+        new RowKernel(rows => Iterator.empty ++ rows) // `++` takes `rows` by name: the plan runs on the first `hasNext`
 
     /** Rows produced by `plan`. Inside the plan rows keep whatever representation is cheapest, such as a source's own
       * values or joined rows read in place; `asTuples` asks for `Out` tuples instead, which the node producing them
