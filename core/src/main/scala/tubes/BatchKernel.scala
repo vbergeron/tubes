@@ -81,7 +81,7 @@ object BatchKernel:
     private[tubes] def rows(batch: ColumnBatch, names: IArray[String]): Iterator[Product] =
         val cols = names.toIndexedSeq.map(batch(_))
         Iterator.range(0, batch.size).map: i =>
-            Tuple.fromArray(Array.tabulate[Object](cols.length)(j => Vectors.get(cols(j), i).asInstanceOf[Object]))
+            Tuple.fromArray(Vectors.build[Object](cols.length)(j => Vectors.get(cols(j), i).asInstanceOf[Object]))
 
     private def run(plan: Plan[?], batchSize: Int): Iterator[ColumnBatch] = plan match
         case s: Scan[?] =>
@@ -201,10 +201,10 @@ private object Eval:
             case Or(l, r)  => logical(Vectors.booleans(eval(l)), r, batch, aggs, when = false)
             case Not(c) =>
                 val a = Vectors.booleans(eval(c))
-                Array.tabulate(n)(i => !a(i))
+                Vectors.build(n)(i => !a(i))
             case Default(c, value) =>
                 val (a, v) = (eval(c), eval(value))
-                Vectors.specialize(Array.tabulate[AnyRef](n): i =>
+                Vectors.specialize(Vectors.build[AnyRef](n): i =>
                     Vectors.get(a, i) match
                         case Some(x) => x.asInstanceOf[AnyRef]
                         case _       => Vectors.get(v, i).asInstanceOf[AnyRef])
@@ -289,7 +289,7 @@ private object BatchAccumulator:
                         sums(gids(i)) += values(i)
                         counts(gids(i)) += 1
                         i += 1
-                def result(groups: Int): Array[?] = Array.tabulate(groups)(g => sums(g) / counts(g))
+                def result(groups: Int): Array[?] = Vectors.build(groups)(g => sums(g) / counts(g))
         case Agg.Min(col, ord) => extremum(col, ord.asInstanceOf[Ordering[Any]], max = false)
         case Agg.Max(col, ord) => extremum(col, ord.asInstanceOf[Ordering[Any]], max = true)
 
@@ -347,33 +347,69 @@ private object BatchAccumulator:
                         i += 1
 
         def result(groups: Int): Array[?] = kind match
-            case 'i' => Array.tabulate(groups)(g => longs(g).toInt)
+            case 'i' => Vectors.build(groups)(g => longs(g).toInt)
             case 'l' => longs.take(groups)
             case 'd' => doubles.take(groups)
             case _   => Vectors.specialize(others.take(groups))
 
-    /** A minimum, or a maximum when `max`: keeps each group's first value, then any value ordered before (after) it. */
+    /** A minimum, or a maximum when `max`: keeps each group's first value, then any value ordered before (after) it.
+      * `Int`s, `Long`s and `Double`s with their default orderings are kept in primitive arrays, others through `ord`.
+      */
     private def extremum(col: Column[?], ord: Ordering[Any], max: Boolean): BatchAccumulator = new BatchAccumulator:
-        private var kept = new Array[AnyRef](16)
-        private var seen = new Array[Boolean](16)
+        private var longs   = new Array[Long](16)
+        private var doubles = new Array[Double](16)
+        private var others  = new Array[AnyRef](16)
+        private var seen    = new Array[Boolean](16)
+        // How the values are kept, settled on the first batch: 'i'nt or 'l'ong in `longs`, 'd'ouble, or 'o'ther values.
+        private var kind = ' '
+
+        /** Whether `c`, the comparison of a new value with the kept one, makes the new value replace it. */
+        private inline def replaces(c: Int): Boolean = if max then c > 0 else c < 0
 
         def update(gids: Array[Int], batch: ColumnBatch, groups: Int): Unit =
             val values = Eval(col, batch)
-            kept = Vectors.grow(kept, groups)
+            if kind == ' ' then
+                kind = (values: Any) match
+                    case _: Array[Int] if ord eq Ordering.Int                                => 'i'
+                    case _: Array[Long] if ord eq Ordering.Long                              => 'l'
+                    case _: Array[Double] if ord.isInstanceOf[Ordering.Double.TotalOrdering] => 'd'
+                    case _                                                                   => 'o'
+            val n = batch.size
             seen = Vectors.grow(seen, groups)
-            var i = 0
-            while i < batch.size do
-                val g = gids(i)
-                val x = Vectors.get(values, i)
-                if !seen(g) then
-                    kept(g) = x.asInstanceOf[AnyRef]
-                    seen(g) = true
-                else
-                    val c = ord.compare(x, kept(g))
-                    if (if max then c > 0 else c < 0) then kept(g) = x.asInstanceOf[AnyRef]
-                i += 1
+            kind match
+                case 'i' | 'l' =>
+                    val a = if kind == 'i' then Vectors.unbox[Int](values).map(_.toLong) else Vectors.unbox[Long](values)
+                    longs = Vectors.grow(longs, groups)
+                    var i = 0
+                    while i < n do
+                        val g = gids(i)
+                        if !seen(g) || replaces(java.lang.Long.compare(a(i), longs(g))) then longs(g) = a(i)
+                        seen(g) = true
+                        i += 1
+                case 'd' =>
+                    val a = Vectors.unbox[Double](values)
+                    doubles = Vectors.grow(doubles, groups)
+                    var i = 0
+                    while i < n do
+                        val g = gids(i)
+                        if !seen(g) || replaces(java.lang.Double.compare(a(i), doubles(g))) then doubles(g) = a(i)
+                        seen(g) = true
+                        i += 1
+                case _ =>
+                    others = Vectors.grow(others, groups)
+                    var i = 0
+                    while i < n do
+                        val g = gids(i)
+                        val x = Vectors.get(values, i)
+                        if !seen(g) || replaces(ord.compare(x, others(g))) then others(g) = x.asInstanceOf[AnyRef]
+                        seen(g) = true
+                        i += 1
 
-        def result(groups: Int): Array[?] = Vectors.specialize(kept.take(groups))
+        def result(groups: Int): Array[?] = kind match
+            case 'i' => Vectors.build(groups)(g => longs(g).toInt)
+            case 'l' => longs.take(groups)
+            case 'd' => doubles.take(groups)
+            case _   => Vectors.specialize(others.take(groups))
 
 /** Pairs each left batch with the matching right rows, through a hash table over the whole right side built on the
   * first read. Equalities between a left and a right expression of the condition are the hash keys; the rest of it is
@@ -405,7 +441,7 @@ private final class HashJoin(j: JoinSpec[?], left: Iterator[ColumnBatch], rightI
     private lazy val table: (java.util.HashMap[Any, Array[Int]], Array[Int]) =
         val rightKeys = keys.map((_, r) => Eval(r, right))
         val heads     = java.util.HashMap[Any, Array[Int]]() // key -> (first, last)
-        val next      = Array.fill(right.size)(-1)
+        val next      = Vectors.build(right.size)(_ => -1)
         var i         = 0
         while i < right.size do
             val key   = Vectors.key(rightKeys, i)
@@ -426,7 +462,7 @@ private final class HashJoin(j: JoinSpec[?], left: Iterator[ColumnBatch], rightI
         else if !unmatchedDone then
             unmatchedDone = true
             val rows = (0 until right.size).filterNot(matched).toArray
-            output(null, Array.fill(rows.length)(-1), rows, rows.length)
+            output(null, Vectors.build(rows.length)(_ => -1), rows, rows.length)
         else Iterator.empty.next()
 
     private def probe(batch: ColumnBatch): ColumnBatch =
@@ -484,6 +520,17 @@ private final class HashJoin(j: JoinSpec[?], left: Iterator[ColumnBatch], rightI
 
 /** Operations over the columns of a batch, with loops over primitive arrays where the types and instances allow. */
 private object Vectors:
+    /** An array of the `n` values `f(0)`, ..., `f(n - 1)`. Inlined, its loop reads and writes primitives where `T` is
+      * one, where `Array.tabulate` boxes every value.
+      */
+    inline def build[T: ClassTag](n: Int)(inline f: Int => T): Array[T] =
+        val out = new Array[T](n)
+        var i   = 0
+        while i < n do
+            out(i) = f(i)
+            i += 1
+        out
+
     /** Value `i` of `a`, boxed. */
     def get(a: Array[?], i: Int): Any = (a: Any) match
         case a: Array[Int]     => a(i)
@@ -499,19 +546,19 @@ private object Vectors:
         else
             def all(cls: Class[?]): Boolean = values.forall(v => v != null && v.getClass == cls)
             values(0) match
-                case _: java.lang.Integer if all(classOf[java.lang.Integer]) => Array.tabulate(n)(values(_).asInstanceOf[Int])
-                case _: java.lang.Long if all(classOf[java.lang.Long])       => Array.tabulate(n)(values(_).asInstanceOf[Long])
-                case _: java.lang.Double if all(classOf[java.lang.Double])   => Array.tabulate(n)(values(_).asInstanceOf[Double])
-                case _: java.lang.Boolean if all(classOf[java.lang.Boolean]) => Array.tabulate(n)(values(_).asInstanceOf[Boolean])
+                case _: java.lang.Integer if all(classOf[java.lang.Integer]) => build(n)(values(_).asInstanceOf[Int])
+                case _: java.lang.Long if all(classOf[java.lang.Long])       => build(n)(values(_).asInstanceOf[Long])
+                case _: java.lang.Double if all(classOf[java.lang.Double])   => build(n)(values(_).asInstanceOf[Double])
+                case _: java.lang.Boolean if all(classOf[java.lang.Boolean]) => build(n)(values(_).asInstanceOf[Boolean])
                 case _                                                       => values
 
     /** `value`, `n` times. */
     def fill(value: Any, n: Int): Array[?] = value match
-        case v: Int     => Array.fill(n)(v)
-        case v: Long    => Array.fill(n)(v)
-        case v: Double  => Array.fill(n)(v)
-        case v: Boolean => Array.fill(n)(v)
-        case v          => Array.fill[AnyRef](n)(v.asInstanceOf[AnyRef])
+        case v: Int     => build(n)(_ => v)
+        case v: Long    => build(n)(_ => v)
+        case v: Double  => build(n)(_ => v)
+        case v: Boolean => build(n)(_ => v)
+        case v          => build[AnyRef](n)(_ => v.asInstanceOf[AnyRef])
 
     /** `a` as booleans, unboxing it if needed. */
     def booleans(a: Array[?]): Array[Boolean] = unbox[Boolean](a)
@@ -519,7 +566,7 @@ private object Vectors:
     /** `a` as an array of the primitive `T`, unboxing it if it is not one already. */
     def unbox[T: ClassTag](a: Array[?]): Array[T] =
         if a.getClass.getComponentType == summon[ClassTag[T]].runtimeClass then a.asInstanceOf[Array[T]]
-        else Array.tabulate[T](a.length)(get(a, _).asInstanceOf[T])
+        else build[T](a.length)(get(a, _).asInstanceOf[T])
 
     /** The positions where `mask(0 until n)` holds, and how many there are. */
     def where(mask: Array[Boolean], n: Int): (Array[Int], Int) =
@@ -534,18 +581,18 @@ private object Vectors:
         (out, count)
 
     def gather(a: Array[?], indices: Array[Int], n: Int): Array[?] = (a: Any) match
-        case a: Array[Int]     => Array.tabulate(n)(k => a(indices(k)))
-        case a: Array[Long]    => Array.tabulate(n)(k => a(indices(k)))
-        case a: Array[Double]  => Array.tabulate(n)(k => a(indices(k)))
-        case a: Array[Boolean] => Array.tabulate(n)(k => a(indices(k)))
-        case a: Array[AnyRef]  => Array.tabulate[AnyRef](n)(k => a(indices(k)))
+        case a: Array[Int]     => build(n)(k => a(indices(k)))
+        case a: Array[Long]    => build(n)(k => a(indices(k)))
+        case a: Array[Double]  => build(n)(k => a(indices(k)))
+        case a: Array[Boolean] => build(n)(k => a(indices(k)))
+        case a: Array[AnyRef]  => build[AnyRef](n)(k => a(indices(k)))
 
     /** Same as `gather`, where index `-1` is a missing row; when `optional`, values are wrapped in `Some`, `None` where
       * missing. `a` may be `null` when every index is `-1`.
       */
     def gatherOptional(a: Array[?], indices: Array[Int], n: Int, optional: Boolean): Array[?] =
         if !optional then gather(a, indices, n)
-        else Array.tabulate[AnyRef](n)(k => if indices(k) < 0 then None else Some(get(a, indices(k))))
+        else build[AnyRef](n)(k => if indices(k) < 0 then None else Some(get(a, indices(k))))
 
     def slice(a: Array[?], from: Int, until: Int): Array[?] = (a: Any) match
         case a: Array[Int]     => java.util.Arrays.copyOfRange(a, from, until)
@@ -588,25 +635,25 @@ private object Vectors:
     def arith(op: ArithOp, l: Array[?], r: Array[?], num: Numeric[Any], n: Int): Array[?] = ((l, r): Any) match
         case (a: Array[Int], b: Array[Int]) if num eq Numeric.IntIsIntegral =>
             op match
-                case ArithOp.Plus  => Array.tabulate(n)(i => a(i) + b(i))
-                case ArithOp.Minus => Array.tabulate(n)(i => a(i) - b(i))
-                case ArithOp.Times => Array.tabulate(n)(i => a(i) * b(i))
+                case ArithOp.Plus  => build(n)(i => a(i) + b(i))
+                case ArithOp.Minus => build(n)(i => a(i) - b(i))
+                case ArithOp.Times => build(n)(i => a(i) * b(i))
         case (a: Array[Long], b: Array[Long]) if num eq Numeric.LongIsIntegral =>
             op match
-                case ArithOp.Plus  => Array.tabulate(n)(i => a(i) + b(i))
-                case ArithOp.Minus => Array.tabulate(n)(i => a(i) - b(i))
-                case ArithOp.Times => Array.tabulate(n)(i => a(i) * b(i))
+                case ArithOp.Plus  => build(n)(i => a(i) + b(i))
+                case ArithOp.Minus => build(n)(i => a(i) - b(i))
+                case ArithOp.Times => build(n)(i => a(i) * b(i))
         case (a: Array[Double], b: Array[Double]) if num eq Numeric.DoubleIsFractional =>
             op match
-                case ArithOp.Plus  => Array.tabulate(n)(i => a(i) + b(i))
-                case ArithOp.Minus => Array.tabulate(n)(i => a(i) - b(i))
-                case ArithOp.Times => Array.tabulate(n)(i => a(i) * b(i))
+                case ArithOp.Plus  => build(n)(i => a(i) + b(i))
+                case ArithOp.Minus => build(n)(i => a(i) - b(i))
+                case ArithOp.Times => build(n)(i => a(i) * b(i))
         case _ =>
             val f: (Any, Any) => Any = op match
                 case ArithOp.Plus  => num.plus
                 case ArithOp.Minus => num.minus
                 case ArithOp.Times => num.times
-            specialize(Array.tabulate[AnyRef](n)(i => f(get(l, i), get(r, i)).asInstanceOf[AnyRef]))
+            specialize(build[AnyRef](n)(i => f(get(l, i), get(r, i)).asInstanceOf[AnyRef]))
 
     def compare(op: CmpOp, l: Array[?], r: Array[?], ord: Ordering[Any], n: Int): Array[Boolean] =
         val test: Int => Boolean = op match
@@ -616,9 +663,9 @@ private object Vectors:
             case CmpOp.Ge => _ >= 0
         ((l, r): Any) match
             case (a: Array[Int], b: Array[Int]) if ord eq Ordering.Int =>
-                Array.tabulate(n)(i => test(Integer.compare(a(i), b(i))))
+                build(n)(i => test(Integer.compare(a(i), b(i))))
             case (a: Array[Long], b: Array[Long]) if ord eq Ordering.Long =>
-                Array.tabulate(n)(i => test(java.lang.Long.compare(a(i), b(i))))
+                build(n)(i => test(java.lang.Long.compare(a(i), b(i))))
             case _ =>
                 // Through `lt`, `lteq`, `gt` and `gteq`, as rows are: an ordering may define them apart from `compare`.
                 val f: (Any, Any) => Boolean = op match
@@ -626,29 +673,29 @@ private object Vectors:
                     case CmpOp.Le => ord.lteq
                     case CmpOp.Gt => ord.gt
                     case CmpOp.Ge => ord.gteq
-                Array.tabulate(n)(i => f(get(l, i), get(r, i)))
+                build(n)(i => f(get(l, i), get(r, i)))
 
     def equal(l: Array[?], r: Array[?], n: Int): Array[Boolean] = ((l, r): Any) match
-        case (a: Array[Int], b: Array[Int])         => Array.tabulate(n)(i => a(i) == b(i))
-        case (a: Array[Long], b: Array[Long])       => Array.tabulate(n)(i => a(i) == b(i))
-        case (a: Array[Double], b: Array[Double])   => Array.tabulate(n)(i => a(i) == b(i))
-        case (a: Array[Boolean], b: Array[Boolean]) => Array.tabulate(n)(i => a(i) == b(i))
-        case _                                      => Array.tabulate(n)(i => get(l, i) == get(r, i))
+        case (a: Array[Int], b: Array[Int])         => build(n)(i => a(i) == b(i))
+        case (a: Array[Long], b: Array[Long])       => build(n)(i => a(i) == b(i))
+        case (a: Array[Double], b: Array[Double])   => build(n)(i => a(i) == b(i))
+        case (a: Array[Boolean], b: Array[Boolean]) => build(n)(i => a(i) == b(i))
+        case _                                      => build(n)(i => get(l, i) == get(r, i))
 
     def div(l: Array[?], r: Array[?], frac: Fractional[Any], n: Int): Array[?] = ((l, r): Any) match
-        case (a: Array[Double], b: Array[Double]) if frac eq Numeric.DoubleIsFractional => Array.tabulate(n)(i => a(i) / b(i))
-        case _ => specialize(Array.tabulate[AnyRef](n)(i => frac.div(get(l, i), get(r, i)).asInstanceOf[AnyRef]))
+        case (a: Array[Double], b: Array[Double]) if frac eq Numeric.DoubleIsFractional => build(n)(i => a(i) / b(i))
+        case _ => specialize(build[AnyRef](n)(i => frac.div(get(l, i), get(r, i)).asInstanceOf[AnyRef]))
 
     def quot(l: Array[?], r: Array[?], int: Integral[Any], n: Int): Array[?] = ((l, r): Any) match
-        case (a: Array[Int], b: Array[Int]) if int eq Numeric.IntIsIntegral    => Array.tabulate(n)(i => a(i) / b(i))
-        case (a: Array[Long], b: Array[Long]) if int eq Numeric.LongIsIntegral => Array.tabulate(n)(i => a(i) / b(i))
-        case _ => specialize(Array.tabulate[AnyRef](n)(i => int.quot(get(l, i), get(r, i)).asInstanceOf[AnyRef]))
+        case (a: Array[Int], b: Array[Int]) if int eq Numeric.IntIsIntegral    => build(n)(i => a(i) / b(i))
+        case (a: Array[Long], b: Array[Long]) if int eq Numeric.LongIsIntegral => build(n)(i => a(i) / b(i))
+        case _ => specialize(build[AnyRef](n)(i => int.quot(get(l, i), get(r, i)).asInstanceOf[AnyRef]))
 
     def toDouble(a: Array[?], num: Numeric[Any], n: Int): Array[Double] = (a: Any) match
-        case a: Array[Int] if num eq Numeric.IntIsIntegral         => Array.tabulate(n)(a(_).toDouble)
-        case a: Array[Long] if num eq Numeric.LongIsIntegral       => Array.tabulate(n)(a(_).toDouble)
+        case a: Array[Int] if num eq Numeric.IntIsIntegral         => build(n)(a(_).toDouble)
+        case a: Array[Long] if num eq Numeric.LongIsIntegral       => build(n)(a(_).toDouble)
         case a: Array[Double] if num eq Numeric.DoubleIsFractional => a
-        case _                                                     => Array.tabulate(n)(i => num.toDouble(get(a, i)))
+        case _                                                     => build(n)(i => num.toDouble(get(a, i)))
 
     /** A growable array of `Int`s. */
     final class IntBuffer:
