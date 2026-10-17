@@ -5,7 +5,7 @@ package tubes
   * with a slot's only when their hashes match, so only then are its values boxed.
   */
 private[tubes] final class OpenKeyMap(arity: Int) extends KeyMap:
-    private var slots: Array[Int]          = Array.fill(KeyMap.capacity(16))(-1)
+    private var slots: Array[Int]          = Vectors.minusOnes(KeyMap.capacity(16))
     private var mask: Int                  = slots.length - 1
     private var hashes: Array[Int]         = new Array(16)
     private val values: Array[Array[AnyRef]] = Array.fill(arity)(new Array[AnyRef](16))
@@ -92,7 +92,7 @@ private[tubes] final class OpenKeyMap(arity: Int) extends KeyMap:
 
     /** Doubles the table, placing the keys again from their hashes. */
     private def grow(): Unit =
-        slots = Array.fill(slots.length * 2)(-1)
+        slots = Vectors.minusOnes(slots.length * 2)
         mask = slots.length - 1
         var id = 0
         while id < size do

@@ -5,7 +5,7 @@ package tubes
   */
 private[tubes] final class LongKeyMap(ints: Boolean) extends KeyMap:
     private var slotKeys: Array[Long] = new Array(KeyMap.capacity(16))
-    private var slotIds: Array[Int]   = Array.fill(slotKeys.length)(-1)
+    private var slotIds: Array[Int]   = Vectors.minusOnes(slotKeys.length)
     private var mask: Int             = slotKeys.length - 1
     private var keys: Array[Long]     = new Array(16)
     var size: Int                     = 0
@@ -50,7 +50,7 @@ private[tubes] final class LongKeyMap(ints: Boolean) extends KeyMap:
     /** Doubles the table, placing the keys again. */
     private def grow(): Unit =
         slotKeys = new Array(slotKeys.length * 2)
-        slotIds = Array.fill(slotKeys.length)(-1)
+        slotIds = Vectors.minusOnes(slotKeys.length)
         mask = slotKeys.length - 1
         var id = 0
         while id < size do

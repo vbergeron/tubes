@@ -75,7 +75,7 @@ private[tubes] object KeyMap:
             val values = Vectors.longs(keys(0))
             if open != null then open.find(values, n)
             else if dense != null then dense.find(values, n)
-            else Array.fill(n)(-1)
+            else Vectors.minusOnes(n)
 
         def keyColumns: IndexedSeq[Array[?]] =
             if open != null then open.keyColumns else if dense != null then dense.keyColumns

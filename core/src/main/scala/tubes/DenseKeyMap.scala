@@ -4,7 +4,7 @@ package tubes
   * `ids(k - min)`. No hashing and no comparison, at the cost of one `Int` per value of the range.
   */
 private[tubes] final class DenseKeyMap(ints: Boolean, val min: Long, val max: Long) extends KeyMap:
-    private var ids: Array[Int] = Array.fill((max - min + 1).toInt)(-1)
+    private var ids: Array[Int] = Vectors.minusOnes((max - min + 1).toInt)
     private[tubes] var keys: Array[Long] = new Array(16)
     var size: Int                        = 0
 

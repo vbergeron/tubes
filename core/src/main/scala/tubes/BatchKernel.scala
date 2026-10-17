@@ -1,6 +1,7 @@
 package tubes
 
 import scala.collection.Factory
+import scala.compiletime.erasedValue
 import scala.reflect.ClassTag
 import NamedTuple.AnyNamedTuple
 
@@ -430,9 +431,9 @@ private final class HashJoin(j: JoinSpec[?], left: Iterator[ColumnBatch], rightI
         val rightKeys = keys.map((_, r) => Eval(r, right))
         val map       = KeyMap(rightKeys)
         val ids       = map.insert(rightKeys, right.size)
-        val first     = Vectors.build(map.size)(_ => -1)
+        val first     = Vectors.minusOnes(map.size)
         val last      = new Array[Int](map.size)
-        val next      = Vectors.build(right.size)(_ => -1)
+        val next      = Vectors.minusOnes(right.size)
         var row       = 0
         while row < right.size do
             val id = ids(row)
@@ -450,7 +451,7 @@ private final class HashJoin(j: JoinSpec[?], left: Iterator[ColumnBatch], rightI
         else if !unmatchedDone then
             unmatchedDone = true
             val rows = (0 until right.size).filterNot(matched).toArray
-            output(null, Vectors.build(rows.length)(_ => -1), rows, rows.length)
+            output(null, Vectors.minusOnes(rows.length), rows, rows.length)
         else Iterator.empty.next()
 
     private def probe(batch: ColumnBatch): ColumnBatch =
@@ -511,12 +512,28 @@ private object Vectors:
     /** An array of the `n` values `f(0)`, ..., `f(n - 1)`. Inlined, its loop reads and writes primitives where `T` is
       * one, where `Array.tabulate` boxes every value.
       */
-    inline def build[T: ClassTag](n: Int)(inline f: Int => T): Array[T] =
-        val out = new Array[T](n)
+    inline def build[T](n: Int)(inline f: Int => T): Array[T] =
+        val out = allocate[T](n)
         var i   = 0
         while i < n do
             out(i) = f(i)
             i += 1
+        out
+
+    /** A new array of `n` `T`s, of the array class picked at compile time. `new Array[T](n)` would go through its
+      * `ClassTag` at run time, which allocates slowly once the JIT has seen several element types at the same call.
+      */
+    inline def allocate[T](n: Int): Array[T] = inline erasedValue[T] match
+        case _: Int     => new Array[Int](n).asInstanceOf[Array[T]]
+        case _: Long    => new Array[Long](n).asInstanceOf[Array[T]]
+        case _: Double  => new Array[Double](n).asInstanceOf[Array[T]]
+        case _: Boolean => new Array[Boolean](n).asInstanceOf[Array[T]]
+        case _: AnyRef  => new Array[AnyRef](n).asInstanceOf[Array[T]]
+
+    /** `n` `-1`s, the end of every chain and the mark of every empty slot. */
+    def minusOnes(n: Int): Array[Int] =
+        val out = new Array[Int](n)
+        java.util.Arrays.fill(out, -1)
         out
 
     /** Value `i` of `a`, boxed. */
@@ -554,7 +571,10 @@ private object Vectors:
     /** `a` as an array of the primitive `T`, unboxing it if it is not one already. */
     def unbox[T: ClassTag](a: Array[?]): Array[T] =
         if a.getClass.getComponentType == summon[ClassTag[T]].runtimeClass then a.asInstanceOf[Array[T]]
-        else build[T](a.length)(get(a, _).asInstanceOf[T])
+        else
+            val out = new Array[T](a.length)
+            for i <- 0 until a.length do out(i) = get(a, i).asInstanceOf[T]
+            out
 
     /** The positions where `mask(0 until n)` holds, and how many there are. */
     def where(mask: Array[Boolean], n: Int): (Array[Int], Int) =
