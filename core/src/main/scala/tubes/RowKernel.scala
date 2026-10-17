@@ -15,7 +15,12 @@ final class RowKernel[Out <: AnyNamedTuple, C] private (factory: Factory[Out, C]
         factory.fromSpecific(RowKernel.rows(plan, asTuples = true).asInstanceOf[Iterator[Out]])
 
 object RowKernel:
-    /** Collects the rows with a standard collection companion such as `List`, `Vector` or `Set`, or any `Factory`. */
+    /** Collects the rows with a standard collection companion such as `List`, `Vector` or `Set`, or any `Factory`.
+      *
+      * `Iterator` streams them instead: rows are computed as they are read and none is kept once returned. Only what a
+      * `groupBy` or a join needs up front is computed when the plan is materialized: all the rows it groups, or its right
+      * rows.
+      */
     def apply[Out <: AnyNamedTuple, C](factory: Factory[Out, C]): RowKernel[Out, C] = new RowKernel(factory)
 
     /** Collects the rows into an `Array`. */
