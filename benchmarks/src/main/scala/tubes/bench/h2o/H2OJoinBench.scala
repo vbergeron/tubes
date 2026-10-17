@@ -33,6 +33,10 @@ class H2OJoinBench:
     @Param(Array("1000000"))
     var n: Int = 0
 
+    /** How the plans read the tables: `rows`, the case class values, or `columns`, stored column by column beforehand. */
+    @Param(Array("rows"))
+    var input: String = ""
+
     var data: H2OData.Joins = null
 
     var q1: Plan[Q1Join] = null
@@ -44,12 +48,16 @@ class H2OJoinBench:
     @Setup
     def setup(): Unit =
         data = H2OData.Joins(n)
-        val x = from(data.x)
-        q1 = x.join(from(data.small))($left.id1 === $right.sId1)
-        q2 = x.join(from(data.medium))($left.id2 === $right.mId2)
-        q3 = x.leftJoin(from(data.medium))($left.id2 === $right.mId2)
-        q4 = x.join(from(data.medium))($left.id5 === $right.mId5)
-        q5 = x.join(from(data.big))($left.id3 === $right.bId3)
+        val columnar = input == "columns"
+        val x        = if columnar then from(Columns.from(data.x)) else from(data.x)
+        val small    = if columnar then from(Columns.from(data.small)) else from(data.small)
+        val medium   = if columnar then from(Columns.from(data.medium)) else from(data.medium)
+        val big      = if columnar then from(Columns.from(data.big)) else from(data.big)
+        q1 = x.join(small)($left.id1 === $right.sId1)
+        q2 = x.join(medium)($left.id2 === $right.mId2)
+        q3 = x.leftJoin(medium)($left.id2 === $right.mId2)
+        q4 = x.join(medium)($left.id5 === $right.mId5)
+        q5 = x.join(big)($left.id3 === $right.bId3)
         check("q1", handWrittenQ1(), rowKernelQ1())
         check("q1 batches", handWrittenQ1(), batchKernelQ1())
         check("q2", handWrittenQ2(), rowKernelQ2())

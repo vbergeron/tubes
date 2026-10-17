@@ -31,6 +31,10 @@ class H2OGroupByBench:
     @Param(Array("1000000"))
     var n: Int = 0
 
+    /** How the plans read the table: `rows`, the case class values, or `columns`, stored column by column beforehand. */
+    @Param(Array("rows"))
+    var input: String = ""
+
     var rows: Vector[GroupRow] = Vector.empty
 
     var q1: Plan[Q1]   = null
@@ -44,13 +48,14 @@ class H2OGroupByBench:
     @Setup
     def setup(): Unit =
         rows = H2OData.groupBy(n)
-        q1 = from(rows).groupBy($.id1)($.v1.sum.as("v1"))
-        q2 = from(rows).groupBy(($.id1, $.id2))($.v1.sum.as("v1"))
-        q3 = from(rows).groupBy($.id3)(($.v1.sum.as("v1"), $.v3.avg.as("v3")))
-        q4 = from(rows).groupBy($.id4)(($.v1.avg.as("v1"), $.v2.avg.as("v2"), $.v3.avg.as("v3")))
-        q5 = from(rows).groupBy($.id6)(($.v1.sum.as("v1"), $.v2.sum.as("v2"), $.v3.sum.as("v3")))
-        q7 = from(rows).groupBy($.id3)(($.v1.max - $.v2.min).as("range_v1_v2"))
-        q10 = from(rows).groupBy(($.id1, $.id2, $.id3, $.id4, $.id5, $.id6))(($.v3.sum.as("v3"), count.as("count")))
+        val source = if input == "columns" then from(Columns.from(rows)) else from(rows)
+        q1 = source.groupBy($.id1)($.v1.sum.as("v1"))
+        q2 = source.groupBy(($.id1, $.id2))($.v1.sum.as("v1"))
+        q3 = source.groupBy($.id3)(($.v1.sum.as("v1"), $.v3.avg.as("v3")))
+        q4 = source.groupBy($.id4)(($.v1.avg.as("v1"), $.v2.avg.as("v2"), $.v3.avg.as("v3")))
+        q5 = source.groupBy($.id6)(($.v1.sum.as("v1"), $.v2.sum.as("v2"), $.v3.sum.as("v3")))
+        q7 = source.groupBy($.id3)(($.v1.max - $.v2.min).as("range_v1_v2"))
+        q10 = source.groupBy(($.id1, $.id2, $.id3, $.id4, $.id5, $.id6))(($.v3.sum.as("v3"), count.as("count")))
         check("q1", handWrittenQ1(), rowKernelQ1())
         check("q1 batches", handWrittenQ1(), batchKernelQ1())
         check("q2", handWrittenQ2(), rowKernelQ2())

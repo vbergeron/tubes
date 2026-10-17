@@ -22,9 +22,25 @@ final class ColumnBatch(val size: Int, val columns: Map[String, Array[?]]):
 
     override def toString: String = columns.keys.mkString(s"ColumnBatch($size rows: ", ", ", ")")
 
+/** Rows of `schema` stored column by column, in batches. The batch kernel reads them as they are; the row kernel reads
+  * them as tuples.
+  */
+final class Columns[R <: AnyNamedTuple](val schema: Schema[R], val batches: IndexedSeq[ColumnBatch]):
+    override def toString: String = s"Columns(${batches.map(_.size).sum} rows)"
+
+object Columns:
+    /** The case class values `rows`, stored column by column in batches of `batchSize`. */
+    inline def from[C <: Product](rows: Seq[C], batchSize: Int = BatchKernel.DefaultBatchSize): Columns[NamedTuple.From[C]] =
+        val schema = Schema.derived[C]
+        Columns(schema, BatchKernel.transpose(rows.iterator, schema.names, batchSize).toIndexedSeq)
+
+    given scanable[R <: AnyNamedTuple]: Scanable.Aux[Columns[R], R] =
+        Scanable.make(_.schema, c => c.batches.iterator.flatMap(BatchKernel.rows(_, c.schema.names)))
+
 /** Batch kernel: runs a plan as an iterator of `ColumnBatch`es of up to `batchSize` rows, evaluating each column
   * expression over whole columns at once, then collects the rows with `factory`. Plans read the same as with
   * `RowKernel`; this kernel interprets the column trees kept in their nodes rather than their compiled row functions.
+  * `Columns` sources are read in the batches they are stored in; other sources are cut into batches of `batchSize`.
   */
 final class BatchKernel[Out <: AnyNamedTuple, C] private (factory: Factory[Out, C], batchSize: Int)
     extends Plan.Compiler[Out]:
@@ -62,7 +78,7 @@ object BatchKernel:
         run(plan, batchSize).filter(_.size > 0)
 
     /** The rows of `batch` as tuples of the `names` columns, in that order. */
-    private def rows(batch: ColumnBatch, names: IArray[String]): Iterator[Product] =
+    private[tubes] def rows(batch: ColumnBatch, names: IArray[String]): Iterator[Product] =
         val cols = names.toIndexedSeq.map(batch(_))
         Iterator.range(0, batch.size).map: i =>
             Tuple.fromArray(Array.tabulate[Object](cols.length)(j => Vectors.get(cols(j), i).asInstanceOf[Object]))
@@ -70,7 +86,10 @@ object BatchKernel:
     private def run(plan: Plan[?], batchSize: Int): Iterator[ColumnBatch] = plan match
         case s: Scan[?] =>
             s.source match
-                case Some(src) => transpose(src.scan, s.schema.names, batchSize)
+                case Some(src) =>
+                    src.value match
+                        case c: Columns[?] => c.batches.iterator
+                        case _             => transpose(src.scan, s.schema.names, batchSize)
                 case None      => sys.error(s"BatchKernel has no data bound for $s")
         case f: FilterSpec[?] =>
             run(f.input, batchSize).map: batch =>
@@ -85,7 +104,7 @@ object BatchKernel:
         case s: SkipSpec[?]    => skip(run(s.input, batchSize), s.count)
 
     /** Cuts `rows` into batches of `batchSize`, one column per name. */
-    private def transpose(rows: Iterator[Product], names: IArray[String], batchSize: Int): Iterator[ColumnBatch] =
+    private[tubes] def transpose(rows: Iterator[Product], names: IArray[String], batchSize: Int): Iterator[ColumnBatch] =
         rows.grouped(batchSize).map: group =>
             val n = group.size
             val columns = names.indices.map: j =>

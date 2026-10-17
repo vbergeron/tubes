@@ -111,6 +111,14 @@ class BatchKernelSuite extends munit.FunSuite:
         assertEquals(from(endless).take(3).materialize(BatchKernel(List, 2)).map(_.sku), List(1, 2, 3))
         assert(reads <= 4, s"read $reads rows")
 
+    test("reads columnar sources in their own batches, with both kernels"):
+        val columns = Columns.from(sales, 2)
+        assertEquals(columns.batches.map(_.size), Vector(2, 2, 1))
+        val plan     = from(columns).filter($.qty > 1).groupBy($.shop)(($.qty.sum.as("qty"), $.price.avg.as("price")))
+        val expected = from(sales).filter($.qty > 1).groupBy($.shop)(($.qty.sum.as("qty"), $.price.avg.as("price")))
+        assertEquals(plan.materialize(BatchKernel(List)), expected.materialize(RowKernel(List)))
+        same(plan)
+
     test("exposes the batches, column by column"):
         val batches = BatchKernel.batches(from(items).select(($.sku, ($.size * 2).as("double"))), 3).toList
         assertEquals(batches.map(_.size), List(3, 1))
