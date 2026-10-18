@@ -13,10 +13,15 @@ object Plan:
       */
     extension [Out <: AnyNamedTuple](plan: Plan[Out])
         inline def filter(inline predicate: Schema[Out] ?=> Column[Boolean]): Plan[Out] =
-            FilterSpec(plan, predicate(using plan.schema), compileStep(predicate))
+            FilterSpec(plan, predicate(using plan.schema), compileStep(predicate), compileBatchStep(predicate))
 
         inline def select[Cols](inline columns: Schema[Out] ?=> Cols)(using p: Projection[Cols]): Plan[p.Out] =
-            SelectSpec[p.Out](plan, p.columns(columns(using plan.schema)), compileProjection(columns))
+            SelectSpec[p.Out](
+                plan,
+                p.columns(columns(using plan.schema)),
+                compileProjection(columns),
+                compileBatchProjection(columns)
+            )
 
         /** Pairs every row with the `right` rows for which `condition` holds, written with `$left` and `$right`. The
           * joined rows have this plan's fields followed by the right ones, so the field names must not clash: rename
@@ -96,23 +101,27 @@ final class Scan[Out <: AnyNamedTuple](val source: Option[Source[Out]], val sche
         case None => schema.names.mkString("Scan(?: ", ", ", ")")
         case _    => schema.names.mkString("Scan(", ", ", ")")
 
-/** Keeps the rows of `input` for which `predicate` holds; the row shape is unchanged. `compiled` evaluates `predicate`. */
+/** Keeps the rows of `input` for which `predicate` holds; the row shape is unchanged. `compiled` evaluates `predicate`
+  * on a row, `batch` over a whole batch when it could be compiled for one.
+  */
 final class FilterSpec[Out <: AnyNamedTuple](
     val input: Plan[Out],
     val predicate: Column[Boolean],
-    val compiled: Product => Boolean
+    val compiled: Product => Boolean,
+    val batch: Option[BatchColumn] = None
 ) extends Plan[Out]:
     def schema: Schema[Out] = input.schema
 
     override def toString: String = s"FilterSpec($input, $predicate)"
 
 /** A projection of `input` onto named `columns`; the output schema takes its names from them. `compiled` builds an
-  * output row from an input row.
+  * output row from an input row; `batch` computes each column over a whole batch, where it could be compiled for one.
   */
 final class SelectSpec[Out <: AnyNamedTuple](
     val input: Plan[?],
     val columns: List[Column[?] & Named[?]],
-    val compiled: Product => Product
+    val compiled: Product => Product,
+    val batch: List[Option[BatchColumn]] = Nil
 ) extends Plan[Out]:
     val schema: Schema[Out] = new Schema[Out](IArray.from(columns.map(_.name)))
 
