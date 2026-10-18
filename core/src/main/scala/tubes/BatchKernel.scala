@@ -39,7 +39,8 @@ object Columns:
 
 /** Batch kernel: runs a plan as an iterator of `ColumnBatch`es of up to `batchSize` rows, evaluating each column
   * expression over whole columns at once, then collects the rows with `factory`. Plans read the same as with
-  * `RowKernel`; this kernel interprets the column trees kept in their nodes rather than their compiled row functions.
+  * `RowKernel`. Filters and selects run the batch functions compiled at their call site, one loop per column; the other
+  * column trees kept in the nodes, and any a call site could not compile, are interpreted.
   * `Columns` sources are read in the batches they are stored in; other sources are cut into batches of `batchSize`.
   */
 final class BatchKernel[Out <: AnyNamedTuple, C] private (factory: Factory[Out, C], batchSize: Int)
@@ -74,8 +75,12 @@ object BatchKernel:
 
     /** The batches `plan` produces, holding the columns of its schema. Empty batches are skipped. */
     def batches(plan: Plan[?], batchSize: Int = DefaultBatchSize): Iterator[ColumnBatch] =
+        batches(plan, batchSize, compiled = true)
+
+    /** Same as `batches`; without `compiled`, interprets every column tree, to compare both ways. */
+    private[tubes] def batches(plan: Plan[?], batchSize: Int, compiled: Boolean): Iterator[ColumnBatch] =
         require(batchSize > 0, s"batchSize must be positive, got $batchSize")
-        run(plan, batchSize).filter(_.size > 0)
+        run(plan, batchSize, compiled).filter(_.size > 0)
 
     /** The rows of `batch` as tuples of the `names` columns, in that order. */
     private[tubes] def rows(batch: ColumnBatch, names: IArray[String]): Iterator[Product] =
@@ -83,25 +88,35 @@ object BatchKernel:
         Iterator.range(0, batch.size).map: i =>
             Tuple.fromArray(Vectors.build[Object](cols.length)(j => Vectors.get(cols(j), i).asInstanceOf[Object]))
 
-    private def run(plan: Plan[?], batchSize: Int): Iterator[ColumnBatch] = plan match
-        case s: Scan[?] =>
-            s.source match
-                case Some(src) =>
-                    src.value match
-                        case c: Columns[?] => c.batches.iterator
-                        case _             => transpose(src.scan, s.schema.names, batchSize)
-                case None      => sys.error(s"BatchKernel has no data bound for $s")
-        case f: FilterSpec[?] =>
-            run(f.input, batchSize).map: batch =>
-                val mask = Vectors.booleans(Eval(f.predicate, batch))
-                val (indices, count) = Vectors.where(mask, batch.size)
-                if count == batch.size then batch else batch.gather(indices, count)
-        case s: SelectSpec[?] =>
-            run(s.input, batchSize).map(batch => ColumnBatch(batch.size, s.columns.map(c => c.name -> Eval(c, batch)).toMap))
-        case j: JoinSpec[?]    => HashJoin(j, run(j.left, batchSize), run(j.right, batchSize))
-        case g: GroupBySpec[?] => Iterator.single(()).flatMap(_ => group(g, run(g.input, batchSize), batchSize))
-        case t: TakeSpec[?]    => take(run(t.input, batchSize), t.count)
-        case s: SkipSpec[?]    => skip(run(s.input, batchSize), s.count)
+    /** The batches of `plan`, computing filters and selects with their compiled batch functions when `compiled`. */
+    private def run(plan: Plan[?], batchSize: Int, compiled: Boolean): Iterator[ColumnBatch] =
+        /** The values of `col` over `batch`, through its compiled function `fn` if there is one. */
+        def column(col: Column[?], fn: Option[BatchColumn], batch: ColumnBatch): Array[?] = fn match
+            case Some(f) if compiled => f(batch)
+            case _                   => Eval(col, batch)
+        def input(p: Plan[?]) = run(p, batchSize, compiled)
+        plan match
+            case s: Scan[?] =>
+                s.source match
+                    case Some(src) =>
+                        src.value match
+                            case c: Columns[?] => c.batches.iterator
+                            case _             => transpose(src.scan, s.schema.names, batchSize)
+                    case None      => sys.error(s"BatchKernel has no data bound for $s")
+            case f: FilterSpec[?] =>
+                input(f.input).map: batch =>
+                    val mask             = Vectors.booleans(column(f.predicate, f.batch, batch))
+                    val (indices, count) = Vectors.where(mask, batch.size)
+                    if count == batch.size then batch else batch.gather(indices, count)
+            case s: SelectSpec[?] =>
+                // Nodes built without batch functions select through the interpreter.
+                val fns = if s.batch.isEmpty then s.columns.map(_ => None) else s.batch
+                input(s.input).map: batch =>
+                    ColumnBatch(batch.size, s.columns.zip(fns).map((c, fn) => c.name -> column(c, fn, batch)).toMap)
+            case j: JoinSpec[?]    => HashJoin(j, input(j.left), input(j.right))
+            case g: GroupBySpec[?] => Iterator.single(()).flatMap(_ => group(g, input(g.input), batchSize))
+            case t: TakeSpec[?]    => take(input(t.input), t.count)
+            case s: SkipSpec[?]    => skip(input(s.input), s.count)
 
     /** Cuts `rows` into batches of `batchSize`, one column per name. */
     private[tubes] def transpose(rows: Iterator[Product], names: IArray[String], batchSize: Int): Iterator[ColumnBatch] =

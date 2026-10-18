@@ -14,6 +14,7 @@ compiles queries at their call site, so on a single thread the goal is to run as
 | `GroupByBench` | Group-by with aggregates over the diamonds dataset |
 | `h2o.H2OGroupByBench` | The group-by questions of the [H2O.ai db-benchmark](https://h2oai.github.io/db-benchmark/) |
 | `h2o.H2OJoinBench` | The join questions of the same benchmark |
+| `BatchExprBench` | A filter and a select on the batch kernel: interpreted, compiled at the call site, and hand-written |
 
 The H2O suites also run every question on the batch kernel, over the tables stored column by column (see
 [Batch kernel at 1e7 rows](#batch-kernel-at-1e7-rows)).
@@ -167,3 +168,25 @@ iterations agree within 15%; join iterations vary up to 4 times, with GC.
 - **Against the columnar engines,** single threaded, it is level with Spark's 16 vCPUs on q2 and q10 and faster on every
   other question, and faster than data.table on group-by q4. It is 1.5 to 2.5 times behind DuckDB, Polars and
   DataFusion on group-by q5, and 4 to 30 times behind them elsewhere.
+
+## Compiled batch expressions
+
+Filters and selects compile their column trees for the batch kernel at their call site, as they do for the row kernel
+(`BatchColumnCompiler`). Each column becomes one loop over the batch: the fields it reads are loaded once as arrays of
+their static types, and every node is inlined as scalar code over the current row, with the standard `Numeric` and
+`Ordering` instances on `Int`, `Long` and `Double` written as the primitive operators. The interpreter instead runs
+one loop per node, writing an intermediate array each, and picks every loop at run time from the arrays' classes and
+the instances. Columns the compiler does not handle, and the key and aggregation columns of group-bys and joins, are
+still interpreted.
+
+`BatchExprBench` runs both on 1e6 generated diamond rows stored column by column, in batches of 4096, next to
+hand-written loops over the same arrays. The filter keeps `price > 1000 && x * y * z > 50.0`, then gathers the
+matching rows of all seven columns; the select computes five arithmetic columns. A 4-core cloud container, OpenJDK 21,
+`-Xmx4g -Xms4g -XX:+AlwaysPreTouch`, one fork, 5 warmup and 5 measured iterations. Times are in milliseconds.
+
+| Query | interpreted | **compiled** | hand-written |
+|---|---:|---:|---:|
+| filter | 36.8 ± 6.4 | **20.4 ± 1.2** | 17.9 ± 4.1 |
+| select | 21.2 ± 2.9 | **10.9 ± 4.0** | 9.4 ± 1.6 |
+
+Compiled, both queries run about twice as fast as interpreted, and within the error bars of the hand-written loops.
