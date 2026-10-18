@@ -190,3 +190,38 @@ matching rows of all seven columns; the select computes five arithmetic columns.
 | select | 21.2 ± 2.9 | **10.9 ± 4.0** | 9.4 ± 1.6 |
 
 Compiled, both queries run about twice as fast as interpreted, and within the error bars of the hand-written loops.
+
+### Compiled group-bys and joins at 1e7 rows
+
+Group-bys and joins compile their batch code where they are written too. Key columns compile like select columns. Keys
+of known types other than a single `Int` or `Long` get a generated key map (`KeyTable`): typed insert and find loops
+that hash and compare primitives unboxed and `String`s through their own methods, where `OpenKeyMap` boxes every value
+it compares. Aggregations fold in one generated loop per batch (`FoldState`), with each running value in an array of
+the type picked at compile time, where the interpreter runs one accumulator per aggregation and picks its loop from the
+arrays it meets. Joins compile both sides' key columns and their residual condition.
+
+The H2O suites run each question on the batch kernel both ways: `batchKernelQn` with the compiled code, and
+`batchInterpretedQn` interpreting every column tree. A 4-core cloud container, OpenJDK 21,
+`-Xmx10g -Xms10g -XX:+AlwaysPreTouch`, 1 fork, 2 warmup and 3 measured iterations; times are the best of the 3, in
+seconds.
+
+| Question | interpreted | **compiled** | ratio |
+|---|---:|---:|---:|
+| group-by q1 sum v1 by id1 | 0.16 | **0.13** | 1.2 |
+| group-by q2 sum v1 by id1:id2 | 0.81 | **0.62** | 1.3 |
+| group-by q3 sum v1, mean v3 by id3 | 0.77 | **0.65** | 1.2 |
+| group-by q4 mean v1:v3 by id4 | 0.12 | **0.08** | 1.5 |
+| group-by q5 sum v1:v3 by id6 | 0.23 | **0.21** | 1.1 |
+| group-by q7 max v1 - min v2 by id3 | 0.81 | **0.70** | 1.2 |
+| group-by q10 sum v3, count by id1:id6 | 4.9 | **4.2** | 1.2 |
+| join q1 small inner on int | 0.33 | **0.37** | 0.9 |
+| join q2 medium inner on int | 0.48 | **0.45** | 1.1 |
+| join q3 medium outer on int | 2.3 | **2.3** | 1.0 |
+| join q4 medium inner on string | 1.3 | **1.2** | 1.1 |
+| join q5 big inner on int | 3.5 | **3.5** | 1.0 |
+
+Group-by iterations agree within 10%: the compiled code runs them 1.1 to 1.5 times as fast, most on the questions
+folding several aggregations (q4) or numbering `String` keys (q2). Joins are level, within their iterations' spread,
+which reaches 3 times with GC. Questions q1, q2, q3 and q5 join on a single `Int` key, numbered by the same maps either
+way, and every join spends most of its time gathering the 10M rows it outputs rather than finding keys, even q4 on
+`String`s.
