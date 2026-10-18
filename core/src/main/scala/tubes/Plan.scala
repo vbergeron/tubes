@@ -65,14 +65,21 @@ object Plan:
             inline condition: JoinSchemas[Out, R] ?=> Column[Boolean]
         ): Plan[J] =
             val schemas = JoinSchemas(plan.schema, RightSchema[Out, R](right.schema, plan.schema.names.length))
-            JoinSpec[J](plan, right, kind, condition(using schemas), compileJoin[Out, R](condition))
+            JoinSpec[J](
+                plan,
+                right,
+                kind,
+                condition(using schemas),
+                compileJoin[Out, R](condition),
+                compileBatchJoin[Out, R](condition)
+            )
 
         /** Groups rows by the named `keys` columns, a single one or a tuple, then aggregates each group with the
           * aggregations given next: `.groupBy($.cut)((count.as("n"), $.price.sum.as("total")))`. Output rows hold the
           * keys followed by the aggregations, one row per group, in order of first appearance.
           */
         inline def groupBy[K](inline keys: Schema[Out] ?=> K)(using k: Projection[K]): GroupBy[Out, k.Out] =
-            GroupBy(plan, k.columns(keys(using plan.schema)), compileKey(keys))
+            GroupBy(plan, k.columns(keys(using plan.schema)), compileKey(keys), compileBatchKeys(keys))
 
         /** Keeps the first `n` rows, or none when `n` is not positive. */
         def take(n: Int): Plan[Out] = TakeSpec(plan, n)
@@ -128,11 +135,14 @@ final class SelectSpec[Out <: AnyNamedTuple](
     override def toString: String =
         schema.names.zip(columns).map((n, c) => s"$n = $c").mkString(s"SelectSpec($input, ", ", ", ")")
 
-/** A `groupBy` waiting for its aggregations; `key` computes a row's group key from the `keys` columns. */
+/** A `groupBy` waiting for its aggregations; `key` computes a row's group key from the `keys` columns, `batchKeys`
+  * numbers the keys of whole batches.
+  */
 final class GroupBy[In <: AnyNamedTuple, K <: AnyNamedTuple](
     val input: Plan[In],
     val keys: List[Column[?] & Named[?]],
-    val key: Product => Any
+    val key: Product => Any,
+    val batchKeys: BatchKeys = BatchKeys.none
 ):
     /** Aggregates each group into the named `aggregations` columns, a single one or a tuple. Each is an aggregation
       * such as `$.price.sum`, or any column computed from aggregations: `($.price.max - $.price.min).as("spread")`.
@@ -141,17 +151,29 @@ final class GroupBy[In <: AnyNamedTuple, K <: AnyNamedTuple](
         using @implicitNotFound("Cannot aggregate ${G}: every aggregation must be named, with .as(\"name\")")
         a: Projection[G]
     ): Plan[NamedTuple.Concat[K, a.Out]] =
-        GroupBySpec(input, keys, key, a.columns(aggregations(using input.schema)), compileAggregates(aggregations))
+        GroupBySpec(
+            input,
+            keys,
+            key,
+            a.columns(aggregations(using input.schema)),
+            compileAggregates(aggregations),
+            batchKeys,
+            compileBatchAggregates(aggregations)
+        )
 
 /** Groups the rows of `input` by `keys` and aggregates each group into the `aggregates` columns, computed from
-  * aggregations over the group's rows; output rows hold the keys followed by the aggregated values. `key` computes a row's group key, `compiled` folds rows into a group.
+  * aggregations over the group's rows; output rows hold the keys followed by the aggregated values. `key` computes a
+  * row's group key, `compiled` folds rows into a group. For whole batches, `batchKeys` numbers the keys and `fold`
+  * folds rows into groups, when it could be compiled.
   */
 final class GroupBySpec[Out <: AnyNamedTuple](
     val input: Plan[?],
     val keys: List[Column[?] & Named[?]],
     val key: Product => Any,
     val aggregates: List[Column[?] & Named[?]],
-    val compiled: Aggregates
+    val compiled: Aggregates,
+    val batchKeys: BatchKeys = BatchKeys.none,
+    val fold: Option[FoldCode] = None
 ) extends Plan[Out]:
     val schema: Schema[Out] = new Schema[Out](IArray.from(keys.map(_.name) ++ aggregates.map(_.name)))
 
@@ -182,14 +204,15 @@ enum JoinKind(val keepsLeft: Boolean, val keepsRight: Boolean):
 
 /** Pairs the rows of `left` and `right` for which `condition` holds, plus the unmatched rows `kind` keeps; the output
   * rows hold the left fields followed by the right ones, optional on the sides an outer join may leave missing.
-  * `keys` compiles `condition` for a hash join.
+  * `keys` compiles `condition` for a hash join of rows, `batch` for one of whole batches when it could be compiled.
   */
 final class JoinSpec[Out <: AnyNamedTuple](
     val left: Plan[?],
     val right: Plan[?],
     val kind: JoinKind,
     val condition: Column[Boolean],
-    val keys: HashKeys
+    val keys: HashKeys,
+    val batch: Option[BatchJoin] = None
 ) extends Plan[Out]:
     val schema: Schema[Out] = new Schema(left.schema.names ++ right.schema.names)
 

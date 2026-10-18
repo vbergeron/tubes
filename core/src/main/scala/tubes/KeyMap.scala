@@ -27,15 +27,25 @@ private[tubes] object KeyMap:
         case IndexedSeq(_: Array[Long]) => Integers(ints = false)
         case _                          => OpenKeyMap(sample.size)
 
+    /** A map for keys read from columns like `sample`, through the loops `codec` generates for their types where there
+      * are some, as `apply(sample)` picks one otherwise.
+      */
+    def apply(sample: IndexedSeq[Array[?]], codec: Option[KeyCodec]): KeyMap = codec match
+        case Some(c) => Compiled(KeyTable(c))
+        case None    => apply(sample)
+
     /** Spreads the bits of `h` over an `Int`, so that close keys land far apart in a table (MurmurHash3's finalizer). */
-    inline def mix(h: Long): Int =
-        var x = h
-        x = (x ^ (x >>> 33)) * 0xff51afd7ed558ccdL
-        x = (x ^ (x >>> 33)) * 0xc4ceb9fe1a85ec53L
-        (x ^ (x >>> 33)).toInt
+    inline def mix(h: Long): Int = KeyTable.mix(h)
 
     /** The smallest power of two above `2 * n`: tables stay at most half full. */
-    def capacity(n: Int): Int = Integer.highestOneBit(math.max(8, n) * 2 - 1) * 2
+    def capacity(n: Int): Int = KeyTable.capacity(n)
+
+    /** Keys numbered by a table whose loops were generated for their types. */
+    private final class Compiled(table: KeyTable) extends KeyMap:
+        def size: Int                                            = table.size
+        def insert(keys: IndexedSeq[Array[?]], n: Int): Array[Int] = table.insert(keys, n)
+        def find(keys: IndexedSeq[Array[?]], n: Int): Array[Int]   = table.find(keys, n)
+        def keyColumns: IndexedSeq[Array[?]]                     = table.keyColumns
 
     /** The widest range of keys numbered by direct addressing: 2^27 ids, 512 MB. */
     private val MaxDenseRange = 1L << 27

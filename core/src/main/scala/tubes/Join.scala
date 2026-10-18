@@ -85,35 +85,16 @@ private def compileJoinImpl[L <: AnyNamedTuple: Type, R <: AnyNamedTuple: Type](
     step: Expr[JoinSchemas[L, R] ?=> Column[Boolean]]
 )(using Quotes): Expr[HashKeys] =
     import quotes.reflect.*
-    val leftArity = Schema.arity[L].getOrElse(report.errorAndAbort(s"Cannot join: the left schema ${Type.show[L]} is not known statically"))
-    val conjuncts = splitAnd(stepBody(step).asExprOf[Column[Boolean]])
-
-    /** Which inputs an expression reads: `Some(true)` only left, `Some(false)` only right, `None` both or neither. */
-    def side(col: Expr[Column[?]]): Option[Boolean] =
-        refIndices(col).map(_.map(_ < leftArity).distinct) match
-            case Some(List(onLeft)) => Some(onLeft)
-            case _                  => None
-
-    /** An equality between a left and a right expression of type `T`. */
-    final case class Key[T](left: Expr[Column[T]], right: Expr[Column[T]])(using val tpe: Type[T])
-
-    val equalities = conjuncts.map:
-        case c @ '{ Column.Equal[t]($a, $b) } =>
-            (side(a), side(b)) match
-                case (Some(true), Some(false)) => Right(Key(a, b))
-                case (Some(false), Some(true)) => Right(Key(b, a))
-                case _                         => Left(c)
-        case c => Left(c)
-    val keys     = equalities.collect { case Right(key) => key }
-    val residual = equalities.collect { case Left(c) => c }
+    val leftArity        = joinArity[L]
+    val (keys, residual)   = splitJoin(stepBody(step).asExprOf[Column[Boolean]], leftArity)
 
     /** Compiles the side of `key` that `side` picks, against rows shifted by `shift`. */
-    def compileKey(key: Key[?], side: Key[?] => Expr[Column[?]], shift: Int): Expr[Product => key.tpe.Underlying] =
+    def compileKey(key: JoinKey[?], side: JoinKey[?] => Expr[Column[?]], shift: Int): Expr[Product => key.tpe.Underlying] =
         import key.tpe
         QuotedColumnCompiler(shift).compile(side(key).asInstanceOf[Expr[Column[key.tpe.Underlying]]])
 
     /** Combines the hashes of the key columns read by `side`, as compiled against rows shifted by `shift`. */
-    def hash(side: Key[?] => Expr[Column[?]], shift: Int): Expr[Product => Int] =
+    def hash(side: JoinKey[?] => Expr[Column[?]], shift: Int): Expr[Product => Int] =
         '{ (row: Product) =>
             ${
                 keys.foldLeft(Expr(0)): (acc, key) =>
@@ -124,7 +105,7 @@ private def compileJoinImpl[L <: AnyNamedTuple: Type, R <: AnyNamedTuple: Type](
         }
 
     /** Whether every key read by `lhs` on `l` (shifted by `lShift`) equals the one read by `rhs` on `r`. */
-    def equal(lhs: Key[?] => Expr[Column[?]], lShift: Int, rhs: Key[?] => Expr[Column[?]], rShift: Int)
+    def equal(lhs: JoinKey[?] => Expr[Column[?]], lShift: Int, rhs: JoinKey[?] => Expr[Column[?]], rShift: Int)
         : Expr[(Product, Product) => Boolean] =
         '{ (l: Product, r: Product) =>
             ${
@@ -148,6 +129,33 @@ private def compileJoinImpl[L <: AnyNamedTuple: Type, R <: AnyNamedTuple: Type](
             $residualFn
         )
     }
+
+/** The arity of the left side of a join, which must be known statically. */
+private def joinArity[L <: AnyNamedTuple: Type](using Quotes): Int =
+    import quotes.reflect.*
+    Schema.arity[L].getOrElse(report.errorAndAbort(s"Cannot join: the left schema ${Type.show[L]} is not known statically"))
+
+/** An equality between a left and a right expression of type `T`, a hash key of a join. */
+private final case class JoinKey[T](left: Expr[Column[T]], right: Expr[Column[T]])(using val tpe: Type[T])
+
+/** Splits a join `condition` into its hash keys, the equalities between an expression reading only left fields and one
+  * reading only right ones, and the rest of its conjuncts. Fields at indices below `leftArity` are the left ones.
+  */
+private def splitJoin(using Quotes)(condition: Expr[Column[Boolean]], leftArity: Int)
+    : (List[JoinKey[?]], List[Expr[Column[Boolean]]]) =
+    /** Which inputs an expression reads: `Some(true)` only left, `Some(false)` only right, `None` both or neither. */
+    def side(col: Expr[Column[?]]): Option[Boolean] =
+        refIndices(col).map(_.map(_ < leftArity).distinct) match
+            case Some(List(onLeft)) => Some(onLeft)
+            case _                  => None
+    val parts = splitAnd(condition).map:
+        case c @ '{ Column.Equal[t]($a, $b) } =>
+            (side(a), side(b)) match
+                case (Some(true), Some(false)) => Right(JoinKey(a, b))
+                case (Some(false), Some(true)) => Right(JoinKey(b, a))
+                case _                         => Left(c)
+        case c => Left(c)
+    (parts.collect { case Right(key) => key }, parts.collect { case Left(c) => c })
 
 /** The conjuncts of a predicate: `a && (b && c)` gives `a`, `b`, `c`. */
 private def splitAnd(using Quotes)(col: Expr[Column[Boolean]]): List[Expr[Column[Boolean]]] =

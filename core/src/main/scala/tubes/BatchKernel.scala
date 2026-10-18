@@ -39,17 +39,18 @@ object Columns:
 
 /** Batch kernel: runs a plan as an iterator of `ColumnBatch`es of up to `batchSize` rows, evaluating each column
   * expression over whole columns at once, then collects the rows with `factory`. Plans read the same as with
-  * `RowKernel`. Filters and selects run the batch functions compiled at their call site, one loop per column; the other
-  * column trees kept in the nodes, and any a call site could not compile, are interpreted.
+  * `RowKernel`. Each step runs the code compiled where it is written: filters and selects one loop per column,
+  * group-bys and joins their key columns, a key map for the keys' types, and group-bys one loop folding every
+  * aggregation. The column trees kept in the nodes are interpreted where a call site could not compile them.
   * `Columns` sources are read in the batches they are stored in; other sources are cut into batches of `batchSize`.
   */
-final class BatchKernel[Out <: AnyNamedTuple, C] private (factory: Factory[Out, C], batchSize: Int)
+final class BatchKernel[Out <: AnyNamedTuple, C] private (factory: Factory[Out, C], batchSize: Int, compiled: Boolean = true)
     extends Plan.Compiler[Out]:
     type A = C
 
     def compile(plan: Plan[Out]): C =
         val names = plan.schema.names
-        val rows  = BatchKernel.batches(plan, batchSize).flatMap(BatchKernel.rows(_, names))
+        val rows  = BatchKernel.batches(plan, batchSize, compiled).flatMap(BatchKernel.rows(_, names))
         factory.fromSpecific(rows.asInstanceOf[Iterator[Out]])
 
 object BatchKernel:
@@ -73,6 +74,10 @@ object BatchKernel:
             DefaultBatchSize
         )
 
+    /** A batch kernel interpreting every column tree, to compare it with the compiled code. */
+    private[tubes] def interpreted[Out <: AnyNamedTuple, C](factory: Factory[Out, C]): BatchKernel[Out, C] =
+        new BatchKernel(factory, DefaultBatchSize, compiled = false)
+
     /** The batches `plan` produces, holding the columns of its schema. Empty batches are skipped. */
     def batches(plan: Plan[?], batchSize: Int = DefaultBatchSize): Iterator[ColumnBatch] =
         batches(plan, batchSize, compiled = true)
@@ -88,13 +93,10 @@ object BatchKernel:
         Iterator.range(0, batch.size).map: i =>
             Tuple.fromArray(Vectors.build[Object](cols.length)(j => Vectors.get(cols(j), i).asInstanceOf[Object]))
 
-    /** The batches of `plan`, computing filters and selects with their compiled batch functions when `compiled`. */
+    /** The batches of `plan`, running the code compiled where each step is written when `compiled`. */
     private def run(plan: Plan[?], batchSize: Int, compiled: Boolean): Iterator[ColumnBatch] =
-        /** The values of `col` over `batch`, through its compiled function `fn` if there is one. */
-        def column(col: Column[?], fn: Option[BatchColumn], batch: ColumnBatch): Array[?] = fn match
-            case Some(f) if compiled => f(batch)
-            case _                   => Eval(col, batch)
-        def input(p: Plan[?]) = run(p, batchSize, compiled)
+        def column(col: Column[?], fn: Option[BatchColumn], batch: ColumnBatch) = BatchKernel.column(col, fn, batch, compiled)
+        def input(p: Plan[?])                                                  = run(p, batchSize, compiled)
         plan match
             case s: Scan[?] =>
                 s.source match
@@ -113,8 +115,9 @@ object BatchKernel:
                 val fns = if s.batch.isEmpty then s.columns.map(_ => None) else s.batch
                 input(s.input).map: batch =>
                     ColumnBatch(batch.size, s.columns.zip(fns).map((c, fn) => c.name -> column(c, fn, batch)).toMap)
-            case j: JoinSpec[?]    => HashJoin(j, input(j.left), input(j.right))
-            case g: GroupBySpec[?] => Iterator.single(()).flatMap(_ => group(g, input(g.input), batchSize))
+            case j: JoinSpec[?] =>
+                HashJoin(j, input(j.left), input(j.right), if compiled then j.batch else None)
+            case g: GroupBySpec[?] => Iterator.single(()).flatMap(_ => group(g, input(g.input), batchSize, compiled))
             case t: TakeSpec[?]    => take(input(t.input), t.count)
             case s: SkipSpec[?]    => skip(input(s.input), s.count)
 
@@ -153,10 +156,59 @@ object BatchKernel:
                 left -= dropped
                 batch.slice(dropped, batch.size)
 
+    /** The values of `col` over `batch`, through its compiled function `fn` if there is one and `compiled`. */
+    private[tubes] def column(col: Column[?], fn: Option[BatchColumn], batch: ColumnBatch, compiled: Boolean): Array[?] =
+        fn match
+            case Some(f) if compiled => f(batch)
+            case _                   => Eval(col, batch)
+
     /** Folds every input batch into the accumulators of its groups, then emits one row per group: its key columns, then
-      * its aggregated columns. Groups come out in order of their first row, `batchSize` per batch.
+      * its aggregated columns. Groups come out in order of their first row, `batchSize` per batch. When `compiled`, keys
+      * are read and numbered, and rows folded, by the code compiled where the `groupBy` is written, where there is some.
       */
-    private def group(g: GroupBySpec[?], input: Iterator[ColumnBatch], batchSize: Int): Iterator[ColumnBatch] =
+    private def group(g: GroupBySpec[?], input: Iterator[ColumnBatch], batchSize: Int, compiled: Boolean)
+        : Iterator[ColumnBatch] =
+        val keyFns = if compiled && g.batchKeys.columns.nonEmpty then g.batchKeys.columns else g.keys.map(_ => None)
+        val codec  = if compiled then g.batchKeys.codec else None
+        def keysOf(batch: ColumnBatch) = g.keys.zip(keyFns).map((k, fn) => column(k, fn, batch, compiled)).toIndexedSeq
+        val fold: Option[FoldCode] = if compiled then g.fold else None
+        val out = fold match
+            case Some(code) => foldCompiled(g, code, input, keysOf, codec)
+            case None       => foldInterpreted(g, input, keysOf, codec)
+        val count = out.size
+        Iterator.range(0, count, batchSize).map(from => out.slice(from, math.min(from + batchSize, count)))
+
+    /** The groups of `input`, folded by the compiled `code`: one batch of the key columns, then the output columns. */
+    private def foldCompiled(
+        g: GroupBySpec[?],
+        code: FoldCode,
+        input: Iterator[ColumnBatch],
+        keysOf: ColumnBatch => IndexedSeq[Array[?]],
+        codec: Option[KeyCodec]
+    ): ColumnBatch =
+        val state          = FoldState(code)
+        var groups: KeyMap = null
+        for batch <- input do
+            val keys = keysOf(batch)
+            if groups == null then groups = KeyMap(keys, codec)
+            val gids = groups.insert(keys, batch.size)
+            state.update(gids, batch, groups.size)
+        if groups == null then groups = KeyMap(g.keys.map(_ => Array.empty[AnyRef]).toIndexedSeq, codec)
+        val count = groups.size
+        ColumnBatch(
+            count,
+            (g.keys.map(_.name).zip(groups.keyColumns) ++ g.aggregates.map(_.name).zip(state.results(count))).toMap
+        )
+
+    /** The groups of `input`, folded by accumulators interpreting the aggregations: one batch of the key columns, then
+      * the output columns.
+      */
+    private def foldInterpreted(
+        g: GroupBySpec[?],
+        input: Iterator[ColumnBatch],
+        keysOf: ColumnBatch => IndexedSeq[Array[?]],
+        codec: Option[KeyCodec]
+    ): ColumnBatch =
         val aggs = g.aggregates.flatMap(Eval.aggregations).distinct
         // Aggregated values are read back as columns of the result batch, named after their slot.
         val slots      = aggs.zipWithIndex.map((agg, i) => (agg: Agg[?]) -> s"#agg$i").toMap[Agg[?], String]
@@ -164,22 +216,21 @@ object BatchKernel:
         // Group ids are key ids: groups are numbered in order of their first row.
         var groups: KeyMap = null
         for batch <- input do
-            val keys = g.keys.map(Eval(_, batch)).toIndexedSeq
-            if groups == null then groups = KeyMap(keys)
+            val keys = keysOf(batch)
+            if groups == null then groups = KeyMap(keys, codec)
             val gids = groups.insert(keys, batch.size)
             accs.foreach(_.update(gids, batch, groups.size))
-        if groups == null then groups = KeyMap(g.keys.map(_ => Array.empty[AnyRef]).toIndexedSeq)
+        if groups == null then groups = KeyMap(g.keys.map(_ => Array.empty[AnyRef]).toIndexedSeq, codec)
         val count = groups.size
         val result = ColumnBatch(
             count,
             g.keys.zip(groups.keyColumns).map((k, values) => k.name -> values).toMap ++
                 aggs.zip(accs).map((agg, acc) => slots(agg) -> acc.result(count))
         )
-        val out = ColumnBatch(
+        ColumnBatch(
             count,
             g.keys.map(k => k.name -> result(k.name)).toMap ++ g.aggregates.map(c => c.name -> Eval(c, result, slots))
         )
-        Iterator.range(0, count, batchSize).map(from => out.slice(from, math.min(from + batchSize, count)))
 
 /** Evaluates column trees over whole batches. */
 private object Eval:
@@ -418,11 +469,38 @@ private object BatchAccumulator:
   * first read. Equalities between a left and a right expression of the condition are the hash keys; the rest of it is
   * checked on the candidate pairs. Outer joins then add the right rows that matched nothing.
   */
-private final class HashJoin(j: JoinSpec[?], left: Iterator[ColumnBatch], rightInput: Iterator[ColumnBatch])
-    extends Iterator[ColumnBatch]:
+private final class HashJoin(
+    j: JoinSpec[?],
+    left: Iterator[ColumnBatch],
+    rightInput: Iterator[ColumnBatch],
+    compiled: Option[BatchJoin]
+) extends Iterator[ColumnBatch]:
     private val leftNames  = j.left.schema.names
     private val rightNames = j.right.schema.names
-    private val (keys, residual) =
+    // The key columns of each side, and the rest of the condition: compiled where the join is written, if they could
+    // be, or split from the condition here and interpreted.
+    private type Keys = ColumnBatch => IndexedSeq[Array[?]]
+    private val sides: (Keys, Keys, Option[KeyCodec], ColumnBatch => Option[Array[Boolean]]) =
+        compiled match
+            case Some(c) =>
+                (
+                    batch => c.leftKeys.map(_(batch)).toIndexedSeq,
+                    batch => c.rightKeys.map(_(batch)).toIndexedSeq,
+                    c.codec,
+                    batch => c.residual.map(r => Vectors.booleans(BatchKernel.column(r, c.residualFn, batch, true)))
+                )
+            case None =>
+                val (keys, residual) = split
+                (
+                    batch => keys.map((l, _) => Eval(l, batch)),
+                    batch => keys.map((_, r) => Eval(r, batch)),
+                    None,
+                    batch => residual.map(r => Vectors.booleans(Eval(r, batch)))
+                )
+    private val (leftKeys, rightKeys, codec, residual) = sides
+
+    /** The hash keys of the condition, pairs of a left and a right expression, and the rest of it. */
+    private def split: (IndexedSeq[(Column[?], Column[?])], Option[Column[Boolean]]) =
         val leftSet  = leftNames.toSet
         val rightSet = rightNames.toSet
         def side(c: Column[?]): Option[Boolean] =
@@ -443,9 +521,9 @@ private final class HashJoin(j: JoinSpec[?], left: Iterator[ColumnBatch], rightI
     // order: `first(id)` is its first row, `rowNext(row)` the next one, `-1` ends a chain.
     private lazy val right: ColumnBatch = Vectors.concat(rightInput.toList, rightNames)
     private lazy val (map, first, rowNext) =
-        val rightKeys = keys.map((_, r) => Eval(r, right))
-        val map       = KeyMap(rightKeys)
-        val ids       = map.insert(rightKeys, right.size)
+        val keys      = rightKeys(right)
+        val map       = KeyMap(keys, codec)
+        val ids       = map.insert(keys, right.size)
         val first     = Vectors.minusOnes(map.size)
         val last      = new Array[Int](map.size)
         val next      = Vectors.minusOnes(right.size)
@@ -470,8 +548,7 @@ private final class HashJoin(j: JoinSpec[?], left: Iterator[ColumnBatch], rightI
         else Iterator.empty.next()
 
     private def probe(batch: ColumnBatch): ColumnBatch =
-        val leftKeys = keys.map((l, _) => Eval(l, batch))
-        val ids      = map.find(leftKeys, batch.size)
+        val ids      = map.find(leftKeys(batch), batch.size)
         val (li, ri) = (Vectors.IntBuffer(), Vectors.IntBuffer())
         var i        = 0
         while i < batch.size do
@@ -483,7 +560,7 @@ private final class HashJoin(j: JoinSpec[?], left: Iterator[ColumnBatch], rightI
                     r = rowNext(r)
             i += 1
         val candidates = ColumnBatch(li.size, batch.gather(li.array, li.size).columns ++ right.gather(ri.array, ri.size).columns)
-        val pass       = residual.map(c => Vectors.booleans(Eval(c, candidates)))
+        val pass       = residual(candidates)
         if j.kind == JoinKind.Inner then
             pass.fold(candidates): mask =>
                 val (indices, count) = Vectors.where(mask, candidates.size)

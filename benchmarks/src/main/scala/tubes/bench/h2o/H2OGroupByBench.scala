@@ -19,8 +19,9 @@ type Q10 = (id1: String, id2: String, id3: String, id4: Int, id5: Int, id6: Int,
 /** The group-by questions of the H2O.ai db-benchmark (https://h2oai.github.io/db-benchmark/), over `n` generated rows.
   * Each supported question runs on the row kernel and as a hand-written loop folding groups into a `LinkedHashMap`, both
   * reading case class values and collecting rows into an `IArray`. Each also runs on the batch kernel, reading the table
-  * stored column by column and returning the groups as column batches, as columnar engines do. Setup checks the rows of
-  * the benchmark being measured.
+  * stored column by column and returning the groups as column batches, as columnar engines do, both with the code
+  * compiled where each query is written and interpreting every column tree. Setup checks the rows of the benchmark being
+  * measured.
   *
   * Questions tubes cannot express yet are kept as placeholders at the end, with the syntax they would use.
   */
@@ -60,7 +61,7 @@ class H2OGroupByBench:
         val source = from(rows)
         onRows = Questions(source)
         val benchmark = params.getBenchmark.split('.').last
-        if benchmark.startsWith("batchKernel") then
+        if benchmark.startsWith("batch") then
             val columns = from(Columns.from(rows))
             onColumns = Questions(columns)
         // Only the benchmark being measured, against the hand-written rows, so that forks do not run every question.
@@ -79,9 +80,10 @@ class H2OGroupByBench:
         : Unit =
         require(expected.nonEmpty, s"$name: no rows")
         val actual = kernel match
-            case "rowKernel"   => rows.materialize(RowKernel(List))
-            case "batchKernel" => columns.materialize(BatchKernel(List))
-            case _             => expected.toList
+            case "rowKernel"        => rows.materialize(RowKernel(List))
+            case "batchKernel"      => columns.materialize(BatchKernel(List))
+            case "batchInterpreted" => columns.materialize(BatchKernel.interpreted(List))
+            case _                  => expected.toList
         require(expected.sameElements(actual), s"$name: kernel disagrees on ${expected.size} groups")
 
     /** Folds every row into the accumulator of its group, created by `init`; groups keep their first-seen order. */
@@ -113,6 +115,9 @@ class H2OGroupByBench:
 
     @Benchmark def batchKernelQ1(): List[ColumnBatch] = BatchKernel.batches(onColumns.q1).toList
 
+    @Benchmark def batchInterpretedQ1(): List[ColumnBatch] =
+        BatchKernel.batches(onColumns.q1, BatchKernel.DefaultBatchSize, compiled = false).toList
+
     @Benchmark def handWrittenQ1(): IArray[Q1] =
         fold(_.id1, _ => IntSum(0))((a, r) => a.v += r.v1).asScala.iterator.map((k, a) => (id1 = k, v1 = a.v)).toIArray
 
@@ -121,6 +126,9 @@ class H2OGroupByBench:
     @Benchmark def rowKernelQ2(): IArray[Q2] = onRows.q2.materialize(RowKernel(IArray))
 
     @Benchmark def batchKernelQ2(): List[ColumnBatch] = BatchKernel.batches(onColumns.q2).toList
+
+    @Benchmark def batchInterpretedQ2(): List[ColumnBatch] =
+        BatchKernel.batches(onColumns.q2, BatchKernel.DefaultBatchSize, compiled = false).toList
 
     @Benchmark def handWrittenQ2(): IArray[Q2] =
         fold(r => (r.id1, r.id2), _ => IntSum(0))((a, r) => a.v += r.v1)
@@ -131,6 +139,9 @@ class H2OGroupByBench:
     @Benchmark def rowKernelQ3(): IArray[Q3] = onRows.q3.materialize(RowKernel(IArray))
 
     @Benchmark def batchKernelQ3(): List[ColumnBatch] = BatchKernel.batches(onColumns.q3).toList
+
+    @Benchmark def batchInterpretedQ3(): List[ColumnBatch] =
+        BatchKernel.batches(onColumns.q3, BatchKernel.DefaultBatchSize, compiled = false).toList
 
     @Benchmark def handWrittenQ3(): IArray[Q3] =
         fold(_.id3, _ => SumMean(0, 0, 0)): (a, r) =>
@@ -144,6 +155,9 @@ class H2OGroupByBench:
     @Benchmark def rowKernelQ4(): IArray[Q4] = onRows.q4.materialize(RowKernel(IArray))
 
     @Benchmark def batchKernelQ4(): List[ColumnBatch] = BatchKernel.batches(onColumns.q4).toList
+
+    @Benchmark def batchInterpretedQ4(): List[ColumnBatch] =
+        BatchKernel.batches(onColumns.q4, BatchKernel.DefaultBatchSize, compiled = false).toList
 
     @Benchmark def handWrittenQ4(): IArray[Q4] =
         fold(_.id4, _ => Means(0, 0, 0, 0)): (a, r) =>
@@ -161,6 +175,9 @@ class H2OGroupByBench:
 
     @Benchmark def batchKernelQ5(): List[ColumnBatch] = BatchKernel.batches(onColumns.q5).toList
 
+    @Benchmark def batchInterpretedQ5(): List[ColumnBatch] =
+        BatchKernel.batches(onColumns.q5, BatchKernel.DefaultBatchSize, compiled = false).toList
+
     @Benchmark def handWrittenQ5(): IArray[Q5] =
         fold(_.id6, _ => Sums(0, 0, 0)): (a, r) =>
             a.v1 += r.v1
@@ -174,6 +191,9 @@ class H2OGroupByBench:
 
     @Benchmark def batchKernelQ7(): List[ColumnBatch] = BatchKernel.batches(onColumns.q7).toList
 
+    @Benchmark def batchInterpretedQ7(): List[ColumnBatch] =
+        BatchKernel.batches(onColumns.q7, BatchKernel.DefaultBatchSize, compiled = false).toList
+
     @Benchmark def handWrittenQ7(): IArray[Q7] =
         fold(_.id3, r => MaxMin(r.v1, r.v2)): (a, r) =>
             if r.v1 > a.v1 then a.v1 = r.v1
@@ -185,6 +205,9 @@ class H2OGroupByBench:
     @Benchmark def rowKernelQ10(): IArray[Q10] = onRows.q10.materialize(RowKernel(IArray))
 
     @Benchmark def batchKernelQ10(): List[ColumnBatch] = BatchKernel.batches(onColumns.q10).toList
+
+    @Benchmark def batchInterpretedQ10(): List[ColumnBatch] =
+        BatchKernel.batches(onColumns.q10, BatchKernel.DefaultBatchSize, compiled = false).toList
 
     @Benchmark def handWrittenQ10(): IArray[Q10] =
         fold(r => (r.id1, r.id2, r.id3, r.id4, r.id5, r.id6), _ => SumCount(0, 0)): (a, r) =>

@@ -42,13 +42,22 @@ private object BatchColumnCompiler:
         case IntR, LongR, DoubleR, BooleanR, Boxed
 
     /** Thrown on a node the compiler does not handle; the column is then left to the interpreter. */
-    private final class Unsupported extends Exception(null, null, false, false)
+    final class Unsupported extends Exception(null, null, false, false)
+
+    /** The arrays a column reads, bound to local values: the fields of a batch by name, and the values of aggregations
+      * already computed, one per group, found by matching the aggregation's tree.
+      */
+    final case class Env(fields: Map[String, Expr[Array[?]]], aggs: List[(Expr[Agg[?]], Expr[Array[?]])] = Nil)
+
+    /** Runs `body`, giving `None` if it meets a node the compiler does not handle. */
+    def attempt[A](body: => A): Option[A] =
+        try Some(body)
+        catch case _: Unsupported => None
 
     def compile[A: Type](col: Expr[Column[A]])(using Quotes): Expr[Option[BatchColumn]] =
-        try
-            val body = function(col)
-            '{ Some($body) }
-        catch case _: Unsupported => '{ None }
+        attempt(function(col)) match
+            case Some(body) => '{ Some($body) }
+            case None       => '{ None }
 
     def repr[A: Type](using Quotes): Repr =
         import quotes.reflect.*
@@ -60,13 +69,15 @@ private object BatchColumnCompiler:
         else Repr.Boxed
 
     /** The function computing `col` over a batch. A column that only reads a field returns that field's array. */
-    private def function[A: Type](col: Expr[Column[A]])(using Quotes): Expr[BatchColumn] =
+    def function[A: Type](col: Expr[Column[A]])(using Quotes): Expr[BatchColumn] =
         val refs = references(col).distinctBy(_._1)
         '{ (batch: ColumnBatch) =>
             ${
                 field(col) match
                     case Some(name) => load(name, repr[A], 'batch)
-                    case None       => bind(refs, Map.empty, 'batch)(env => loop(col, env, 'batch))
+                    case None =>
+                        bind(refs.map((name, r) => (name, r, load(name, r, 'batch)))):
+                            arrays => loop(col, Env(arrays.toMap), '{ batch.size })
             }
         }
 
@@ -76,53 +87,67 @@ private object BatchColumnCompiler:
         case '{ type n <: String; Column.Alias[t, n]($c, $name) }   => field(c)
         case _                                                     => None
 
-    /** The fields `col` reads, with how each is held. */
-    private def references(col: Expr[Column[?]])(using Quotes): List[(String, Repr)] = stripColumn(col) match
+    /** The fields `col` reads, with how each is held; aggregations are not looked into. */
+    def references(col: Expr[Column[?]])(using Quotes): List[(String, Repr)] = stripColumn(col) match
         case '{ type n <: String; Column.Ref[t, n]($name, $index) } =>
             List(name.value.getOrElse(throw Unsupported()) -> repr[t])
-        case c => children(c).getOrElse(Nil).flatMap(references)
+        case '{ Column.Aggregate[t]($agg) } => Nil
+        case c                              => children(c).getOrElse(Nil).flatMap(references)
 
-    /** The array of field `name`, as `repr` holds it: converted if the batch holds it otherwise, e.g. when empty. */
-    private def load(name: String, repr: Repr, batch: Expr[ColumnBatch])(using Quotes): Expr[Array[?]] =
-        val values = '{ $batch(${ Expr(name) }) }
-        repr match
-            case Repr.IntR     => '{ BatchColumns.ints($values) }
-            case Repr.LongR    => '{ BatchColumns.longs($values) }
-            case Repr.DoubleR  => '{ BatchColumns.doubles($values) }
-            case Repr.BooleanR => '{ BatchColumns.booleans($values) }
-            case Repr.Boxed    => '{ BatchColumns.objects($values) }
+    /** The array of field `name` of `batch`, as `repr` holds it. */
+    def load(name: String, repr: Repr, batch: Expr[ColumnBatch])(using Quotes): Expr[Array[?]] =
+        normalize('{ $batch(${ Expr(name) }) }, repr)
 
-    /** Binds the array of each of `refs` to a local value, then builds `body` over them. */
-    private def bind(refs: List[(String, Repr)], env: Map[String, Expr[Array[?]]], batch: Expr[ColumnBatch])(
-        body: Map[String, Expr[Array[?]]] => Expr[Array[?]]
-    )(using Quotes): Expr[Array[?]] = refs match
-        case Nil => body(env)
-        case (name, repr) :: rest =>
-            /** Binds the field's array as an `Array[T]`, then the rest. */
-            def let[T: Type]: Expr[Array[?]] =
-                '{
-                    val a = ${ load(name, repr, batch) }.asInstanceOf[Array[T]]
-                    ${ bind(rest, env + (name -> 'a), batch)(body) }
-                }
-            repr match
-                case Repr.IntR     => let[Int]
-                case Repr.LongR    => let[Long]
-                case Repr.DoubleR  => let[Double]
-                case Repr.BooleanR => let[Boolean]
-                case Repr.Boxed    => let[AnyRef]
+    /** `values` as `repr` holds them: converted if they are held otherwise, e.g. boxed in an empty batch. */
+    def normalize(values: Expr[Array[?]], repr: Repr)(using Quotes): Expr[Array[?]] = repr match
+        case Repr.IntR     => '{ BatchColumns.ints($values) }
+        case Repr.LongR    => '{ BatchColumns.longs($values) }
+        case Repr.DoubleR  => '{ BatchColumns.doubles($values) }
+        case Repr.BooleanR => '{ BatchColumns.booleans($values) }
+        case Repr.Boxed    => '{ BatchColumns.objects($values) }
 
-    /** One loop over the rows of `batch`, writing `col` at every row into an array of its representation. */
-    private def loop[A: Type](col: Expr[Column[A]], env: Map[String, Expr[Array[?]]], batch: Expr[ColumnBatch])(
+    /** The array type `repr` holds values in. */
+    def arrayType(repr: Repr)(using Quotes): Type[? <: Array[?]] = repr match
+        case Repr.IntR     => Type.of[Array[Int]]
+        case Repr.LongR    => Type.of[Array[Long]]
+        case Repr.DoubleR  => Type.of[Array[Double]]
+        case Repr.BooleanR => Type.of[Array[Boolean]]
+        case Repr.Boxed    => Type.of[Array[AnyRef]]
+
+    /** Binds each of `arrays`, held as its `Repr`, to a local value of its array type, then builds `body` over the
+      * bound values, by key.
+      */
+    def bind[K, R: Type](arrays: List[(K, Repr, Expr[Array[?]])])(body: List[(K, Expr[Array[?]])] => Expr[R])(
         using Quotes
-    ): Expr[Array[?]] =
+    ): Expr[R] = arrays match
+        case Nil => body(Nil)
+        case (key, repr, values) :: rest =>
+            arrayType(repr) match
+                case '[t] =>
+                    '{
+                        val a = $values.asInstanceOf[t]
+                        ${ bind(rest)(bound => body((key, 'a.asExprOf[Array[?]]) :: bound)) }
+                    }
+
+    /** The element of `values`, held as `repr`, at index `i`, as an `A`. */
+    def element[A: Type](values: Expr[Array[?]], repr: Repr, i: Expr[Int])(using Quotes): Expr[A] = (repr match
+        case Repr.IntR     => '{ ${ values.asExprOf[Array[Int]] }($i) }
+        case Repr.LongR    => '{ ${ values.asExprOf[Array[Long]] }($i) }
+        case Repr.DoubleR  => '{ ${ values.asExprOf[Array[Double]] }($i) }
+        case Repr.BooleanR => '{ ${ values.asExprOf[Array[Boolean]] }($i) }
+        case Repr.Boxed    => '{ ${ values.asExprOf[Array[AnyRef]] }($i).asInstanceOf[A] }
+    ).asExprOf[A]
+
+    /** One loop over `n` rows, writing `col` at every row into an array of its representation. */
+    def loop[A: Type](col: Expr[Column[A]], env: Env, n: Expr[Int])(using Quotes): Expr[Array[?]] =
         def at(i: Expr[Int]): Expr[A] = scalar(col, env, i)
         repr[A] match
             case Repr.IntR =>
                 '{
-                    val n   = $batch.size
-                    val out = new Array[Int](n)
+                    val size = $n
+                    val out = new Array[Int](size)
                     var i   = 0
-                    while i < n do
+                    while i < size do
                         val row = i
                         out(row) = ${ at('row).asExprOf[Int] }
                         i += 1
@@ -130,10 +155,10 @@ private object BatchColumnCompiler:
                 }
             case Repr.LongR =>
                 '{
-                    val n   = $batch.size
-                    val out = new Array[Long](n)
+                    val size = $n
+                    val out = new Array[Long](size)
                     var i   = 0
-                    while i < n do
+                    while i < size do
                         val row = i
                         out(row) = ${ at('row).asExprOf[Long] }
                         i += 1
@@ -141,10 +166,10 @@ private object BatchColumnCompiler:
                 }
             case Repr.DoubleR =>
                 '{
-                    val n   = $batch.size
-                    val out = new Array[Double](n)
+                    val size = $n
+                    val out = new Array[Double](size)
                     var i   = 0
-                    while i < n do
+                    while i < size do
                         val row = i
                         out(row) = ${ at('row).asExprOf[Double] }
                         i += 1
@@ -152,10 +177,10 @@ private object BatchColumnCompiler:
                 }
             case Repr.BooleanR =>
                 '{
-                    val n   = $batch.size
-                    val out = new Array[Boolean](n)
+                    val size = $n
+                    val out = new Array[Boolean](size)
                     var i   = 0
-                    while i < n do
+                    while i < size do
                         val row = i
                         out(row) = ${ at('row).asExprOf[Boolean] }
                         i += 1
@@ -163,10 +188,10 @@ private object BatchColumnCompiler:
                 }
             case Repr.Boxed =>
                 '{
-                    val n   = $batch.size
-                    val out = new Array[AnyRef](n)
+                    val size = $n
+                    val out = new Array[AnyRef](size)
                     var i   = 0
-                    while i < n do
+                    while i < size do
                         val row = i
                         out(row) = ${ at('row) }.asInstanceOf[AnyRef]
                         i += 1
@@ -174,37 +199,33 @@ private object BatchColumnCompiler:
                 }
 
     /** Whether `instance` is the standard given named `name`, such as `scala.math.Numeric.IntIsIntegral`. */
-    private def isStandard(instance: Expr[Any], names: String*)(using Quotes): Boolean =
+    def isStandard(instance: Expr[Any], names: String*)(using Quotes): Boolean =
         import quotes.reflect.*
         val sym = peel(instance.asTerm).symbol
         !sym.isNoSymbol && names.contains(sym.fullName)
 
-    private val IntNumeric    = "scala.math.Numeric$.IntIsIntegral"
-    private val LongNumeric   = "scala.math.Numeric$.LongIsIntegral"
-    private val DoubleNumeric = "scala.math.Numeric$.DoubleIsFractional"
-    private val IntOrdering   = "scala.math.Ordering$.Int"
-    private val LongOrdering  = "scala.math.Ordering$.Long"
+    val IntNumeric    = "scala.math.Numeric$.IntIsIntegral"
+    val LongNumeric   = "scala.math.Numeric$.LongIsIntegral"
+    val DoubleNumeric = "scala.math.Numeric$.DoubleIsFractional"
+    val IntOrdering   = "scala.math.Ordering$.Int"
+    val LongOrdering  = "scala.math.Ordering$.Long"
     /** The `Double` orderings comparing as `java.lang.Double.compare` does, the given one among them. */
-    private val DoubleTotalOrderings =
+    val DoubleTotalOrderings =
         Seq("scala.math.Ordering$.DeprecatedDoubleOrdering", "scala.math.Ordering$.Double$.TotalOrdering")
     /** The `Double` ordering comparing as the operators do. */
-    private val DoubleIeeeOrdering = "scala.math.Ordering$.Double$.IeeeOrdering"
+    val DoubleIeeeOrdering = "scala.math.Ordering$.Double$.IeeeOrdering"
 
-    /** The value of `col` at row `i`, the arrays of the fields it reads being bound in `env`. */
-    private def scalar[A: Type](col: Expr[Column[A]], env: Map[String, Expr[Array[?]]], i: Expr[Int])(
-        using Quotes
-    ): Expr[A] =
+    /** The value of `col` at row `i`, the arrays it reads being bound in `env`. */
+    def scalar[A: Type](col: Expr[Column[A]], env: Env, i: Expr[Int])(using Quotes): Expr[A] =
         def sub[B: Type](c: Expr[Column[B]]): Expr[B] = scalar(c, env, i)
         stripColumn(col) match
             case '{ type n <: String; Column.Ref[A, n]($name, $index) } =>
-                val values = env(name.value.getOrElse(throw Unsupported()))
-                (repr[A] match
-                    case Repr.IntR     => '{ ${ values.asExprOf[Array[Int]] }($i) }
-                    case Repr.LongR    => '{ ${ values.asExprOf[Array[Long]] }($i) }
-                    case Repr.DoubleR  => '{ ${ values.asExprOf[Array[Double]] }($i) }
-                    case Repr.BooleanR => '{ ${ values.asExprOf[Array[Boolean]] }($i) }
-                    case Repr.Boxed    => '{ ${ values.asExprOf[Array[AnyRef]] }($i).asInstanceOf[A] }
-                ).asExprOf[A]
+                val values = env.fields.getOrElse(name.value.getOrElse(throw Unsupported()), throw Unsupported())
+                element[A](values, repr[A], i)
+            case '{ Column.Aggregate[A]($agg) } =>
+                env.aggs.find((a, _) => a.matches(agg)) match
+                    case Some((_, values)) => element[A](values, repr[A], i)
+                    case None              => throw Unsupported()
             case '{ type n <: String; Column.Alias[A, n]($c, $name) } => sub(c)
             case '{ Column.Lit[A]($value) }                         => value
             case '{ Column.Arith[A]($op, $l, $r, $num) } =>

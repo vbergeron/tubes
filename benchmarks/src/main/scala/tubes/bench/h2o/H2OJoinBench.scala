@@ -23,7 +23,8 @@ type Q5Join = Concat[XRow, BigRow]
   * the left fields followed by the right ones. Each runs on the row kernel and as a hand-written hash join building a
   * `HashMap` over the right table and the same output rows, both reading case class values and collecting rows into an
   * `IArray`. Each also runs on the batch kernel, reading the tables stored column by column and returning the joined
-  * table as column batches, as columnar engines do. Setup checks the rows of the benchmark being measured.
+  * table as column batches, as columnar engines do, both with the code compiled where each query is written and
+  * interpreting every column tree. Setup checks the rows of the benchmark being measured.
   */
 @State(Scope.Benchmark)
 @BenchmarkMode(Array(Mode.AverageTime))
@@ -58,7 +59,7 @@ class H2OJoinBench:
         val (x, small, medium, big) = (from(data.x), from(data.small), from(data.medium), from(data.big))
         onRows = Questions(x, small, medium, big)
         val benchmark = params.getBenchmark.split('.').last
-        if benchmark.startsWith("batchKernel") then
+        if benchmark.startsWith("batch") then
             val (x, small, medium, big) = (
                 from(Columns.from(data.x)),
                 from(Columns.from(data.small)),
@@ -80,9 +81,10 @@ class H2OJoinBench:
         : Unit =
         require(expected.nonEmpty, s"$name: no rows")
         val actual = kernel match
-            case "rowKernel"   => rows.materialize(RowKernel(List))
-            case "batchKernel" => columns.materialize(BatchKernel(List))
-            case _             => expected.toList
+            case "rowKernel"        => rows.materialize(RowKernel(List))
+            case "batchKernel"      => columns.materialize(BatchKernel(List))
+            case "batchInterpreted" => columns.materialize(BatchKernel.interpreted(List))
+            case _                  => expected.toList
         require(expected.sameElements(actual), s"$name: kernel disagrees on ${expected.size} rows")
 
     /** The right rows by key; db-benchmark right tables hold each key once. */
@@ -107,6 +109,9 @@ class H2OJoinBench:
 
     @Benchmark def batchKernelQ1(): List[ColumnBatch] = BatchKernel.batches(onColumns.q1).toList
 
+    @Benchmark def batchInterpretedQ1(): List[ColumnBatch] =
+        BatchKernel.batches(onColumns.q1, BatchKernel.DefaultBatchSize, compiled = false).toList
+
     @Benchmark def handWrittenQ1(): IArray[Q1Join] =
         innerJoin(index(data.small)(_.sId1))(_.id1): (l, r) =>
             (
@@ -120,6 +125,9 @@ class H2OJoinBench:
 
     @Benchmark def batchKernelQ2(): List[ColumnBatch] = BatchKernel.batches(onColumns.q2).toList
 
+    @Benchmark def batchInterpretedQ2(): List[ColumnBatch] =
+        BatchKernel.batches(onColumns.q2, BatchKernel.DefaultBatchSize, compiled = false).toList
+
     @Benchmark def handWrittenQ2(): IArray[Q2Join] =
         innerJoin(index(data.medium)(_.mId2))(_.id2)(mediumRow)
 
@@ -128,6 +136,9 @@ class H2OJoinBench:
     @Benchmark def rowKernelQ3(): IArray[Q3Join] = onRows.q3.materialize(RowKernel(IArray))
 
     @Benchmark def batchKernelQ3(): List[ColumnBatch] = BatchKernel.batches(onColumns.q3).toList
+
+    @Benchmark def batchInterpretedQ3(): List[ColumnBatch] =
+        BatchKernel.batches(onColumns.q3, BatchKernel.DefaultBatchSize, compiled = false).toList
 
     @Benchmark def handWrittenQ3(): IArray[Q3Join] =
         val table = index(data.medium)(_.mId2)
@@ -147,6 +158,9 @@ class H2OJoinBench:
 
     @Benchmark def batchKernelQ4(): List[ColumnBatch] = BatchKernel.batches(onColumns.q4).toList
 
+    @Benchmark def batchInterpretedQ4(): List[ColumnBatch] =
+        BatchKernel.batches(onColumns.q4, BatchKernel.DefaultBatchSize, compiled = false).toList
+
     @Benchmark def handWrittenQ4(): IArray[Q4Join] =
         innerJoin(index(data.medium)(_.mId5))(_.id5)(mediumRow)
 
@@ -155,6 +169,9 @@ class H2OJoinBench:
     @Benchmark def rowKernelQ5(): IArray[Q5Join] = onRows.q5.materialize(RowKernel(IArray))
 
     @Benchmark def batchKernelQ5(): List[ColumnBatch] = BatchKernel.batches(onColumns.q5).toList
+
+    @Benchmark def batchInterpretedQ5(): List[ColumnBatch] =
+        BatchKernel.batches(onColumns.q5, BatchKernel.DefaultBatchSize, compiled = false).toList
 
     @Benchmark def handWrittenQ5(): IArray[Q5Join] =
         innerJoin(index(data.big)(_.bId3))(_.id3): (l, r) =>
